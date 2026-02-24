@@ -13,6 +13,13 @@ import re
 import threading
 import subprocess
 import platform
+import json
+import uuid
+import queue
+import resource
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 # Packages are installed by workmode.sh into .venv before this script runs.
 # Running directly? Use:  bash workmode.sh
@@ -350,133 +357,449 @@ def handle_system(query: str) -> str:
 
 _global_mic: SmartMic | None = None
 
-_BLOCKED_PATHS = [
-    "/System", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
-    "/usr/lib", "/usr/libexec", "/private/etc",
-    "/Library/Apple", "/dev",
+ACTION_CREATE_FOLDER = "create_folder"
+ACTION_CREATE_FILE = "create_file"
+ACTION_LIST_PATH = "list_path"
+ACTION_FIND_NAME = "find_name"
+ACTION_MOVE_PATH = "move_path"
+ACTION_COPY_PATH = "copy_path"
+ACTION_RENAME_PATH = "rename_path"
+ACTION_DELETE_PATH = "delete_path"
+ACTION_DISK_USAGE = "disk_usage"
+ACTION_GIT_STATUS = "git_status"
+
+SUPPORTED_ACTIONS = {
+    ACTION_CREATE_FOLDER,
+    ACTION_CREATE_FILE,
+    ACTION_LIST_PATH,
+    ACTION_FIND_NAME,
+    ACTION_MOVE_PATH,
+    ACTION_COPY_PATH,
+    ACTION_RENAME_PATH,
+    ACTION_DELETE_PATH,
+    ACTION_DISK_USAGE,
+    ACTION_GIT_STATUS,
+}
+
+WRITE_ACTIONS = {
+    ACTION_CREATE_FOLDER,
+    ACTION_CREATE_FILE,
+    ACTION_MOVE_PATH,
+    ACTION_COPY_PATH,
+    ACTION_RENAME_PATH,
+    ACTION_DELETE_PATH,
+}
+
+DESTRUCTIVE_ACTIONS = {ACTION_DELETE_PATH}
+
+PROTECTED_PATHS = [
+    "/System", "/bin", "/sbin", "/usr", "/private/etc", "/Library/Apple", "/dev"
 ]
 
-_BLOCKED_RE = [re.compile(p, re.IGNORECASE) for p in [
-    r'\bsudo\b',
-    r'\bdd\s+if=',
-    r'\bmkfs\b',
-    r':\(\)\s*\{',
-    r'curl\s+[^\|]+\|\s*(ba|z)?sh',
-    r'wget\s+[^\|]+\|\s*(ba|z)?sh',
-    r'\bchmod\s+[0-9]+\s+/',
-    r'\bchown\s+\S+\s+/',
-    r'\blaunchctl\s+(unload|disable|remove)\b',
-    r'>\s*/dev/(?:r?disk[0-9]|zero)',
-    r'\brm\s+-[a-z]*r[a-z]*f\s+/',
-]]
+ACTION_TIMEOUT_SECONDS = 20
+ACTION_MAX_RETRIES = 2
+RATE_LIMIT_PER_MINUTE = 20
+ALERT_FAILURE_THRESHOLD = 5
 
-_DESTRUCTIVE_RE = re.compile(r'\b(rm\b|rmdir\b|killall\b|pkill\b)', re.IGNORECASE)
-
-def _safe_check(cmd: str) -> tuple:
-    for pat in _BLOCKED_RE:
-        if pat.search(cmd):
-            return False, "blocked pattern"
-    for path in _BLOCKED_PATHS:
-        if re.search(re.escape(path) + r'(?:[/\s"\'\\]|$)', cmd):
-            return False, f"protected path: {path}"
-    if re.search(r'\brm\b', cmd, re.IGNORECASE):
-        for p in re.findall(r'["\']?(/[^\s"\';&|]+)', cmd):
-            if not p.startswith(HOME):
-                return False, "rm outside home"
-    return True, ""
+AUDIT_DIR = Path(HOME) / ".jarvis_audit"
+AUDIT_FILE = AUDIT_DIR / "audit.jsonl"
+METRICS_FILE = AUDIT_DIR / "metrics.jsonl"
 
 
-def _generate_shell_cmd(natural: str) -> str:
-    """Translate natural language into one zsh command via the LLM."""
-    cmd = _chat(
-        system=(
-            "You are a macOS zsh command generator.\n"
-            f"User home: {HOME}\n"
-            "Output ONE raw shell command only. No explanation, no markdown, no backticks.\n"
-            "Rules:\n"
-            "Never use sudo.\n"
-            "Use full absolute paths, never ~.\n"
-            f"To delete: osascript -e 'tell app \"Finder\" to delete POSIX file \"/full/path\"'\n"
-            "To create folder: mkdir -p /full/path\n"
-            "To create file: touch /full/path/filename\n"
-            "To list: ls -la /full/path\n"
-            "To find: find /path -name 'pattern' -maxdepth 4\n"
-            "To check disk space: df -h /Users\n"
-            "To quit app: osascript -e 'tell app \"Name\" to quit'\n"
-            "To move: mv /src /dst\n"
-            "To copy: cp -r /src /dst\n"
-            "To rename: mv /old /new\n"
-            "To zip: zip -r /dst.zip /src\n"
-            "For git: cd /path && git command\n"
-            "For brew: /opt/homebrew/bin/brew command\n"
-            "ONE line only. Nothing else."
-        ),
-        user=natural,
-        temperature=0.05,
-        stop=["\n", "Note:", "This"],
-        timeout=25,
-    )
-    cmd = re.sub(r"^```[a-z]*\n?", "", cmd).strip("`").strip()
-    return cmd.splitlines()[0].strip() if cmd else ""
+@dataclass
+class ActionRequest:
+    action: str
+    args: dict[str, Any]
+    principal: str
+    reason: str
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: float = field(default_factory=time.time)
 
 
-def _run_cmd(cmd: str, timeout: int = 30) -> tuple:
-    try:
-        r = subprocess.run(
-            cmd, shell=True, executable="/bin/zsh",
-            capture_output=True, text=True, timeout=timeout,
+@dataclass
+class PolicyDecision:
+    allowed: bool
+    reason: str
+    requires_approval: bool = False
+
+
+@dataclass
+class ActionResult:
+    ok: bool
+    return_code: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+    command_repr: str
+
+
+@dataclass
+class ActionJob:
+    request: ActionRequest
+    done: threading.Event = field(default_factory=threading.Event)
+    result: ActionResult | None = None
+
+
+class FixedWindowRateLimiter:
+    def __init__(self, max_per_minute: int):
+        self.max_per_minute = max_per_minute
+        self._lock = threading.Lock()
+        self._state: dict[str, tuple[int, int]] = {}
+
+    def allow(self, principal: str) -> tuple[bool, int]:
+        now_min = int(time.time() // 60)
+        with self._lock:
+            minute, count = self._state.get(principal, (now_min, 0))
+            if minute != now_min:
+                minute, count = now_min, 0
+            if count >= self.max_per_minute:
+                retry_after = 60 - int(time.time() % 60)
+                return False, max(retry_after, 1)
+            self._state[principal] = (minute, count + 1)
+        return True, 0
+
+
+_rate_limiter = FixedWindowRateLimiter(RATE_LIMIT_PER_MINUTE)
+_action_queue: queue.Queue[ActionJob] = queue.Queue(maxsize=128)
+_queue_worker_started = False
+_queue_lock = threading.Lock()
+_failure_streak = 0
+
+
+def _ensure_audit_dir():
+    AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]):
+    _ensure_audit_dir()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _audit(event: str, request: ActionRequest, decision: PolicyDecision | None = None,
+           result: ActionResult | None = None, message: str = ""):
+    payload: dict[str, Any] = {
+        "ts": time.time(),
+        "event": event,
+        "request_id": request.request_id,
+        "principal": request.principal,
+        "action": request.action,
+        "args": request.args,
+        "message": message,
+    }
+    if decision:
+        payload["policy"] = {
+            "allowed": decision.allowed,
+            "reason": decision.reason,
+            "requires_approval": decision.requires_approval,
+        }
+    if result:
+        payload["result"] = {
+            "ok": result.ok,
+            "return_code": result.return_code,
+            "duration_ms": result.duration_ms,
+            "command": result.command_repr,
+            "stderr": result.stderr[:300],
+        }
+    _append_jsonl(AUDIT_FILE, payload)
+
+
+def _metric(name: str, value: float, tags: dict[str, str] | None = None):
+    _append_jsonl(METRICS_FILE, {
+        "ts": time.time(),
+        "name": name,
+        "value": value,
+        "tags": tags or {},
+    })
+
+
+def _local_alert(message: str):
+    print(f"🚨 ALERT: {message}")
+    _metric("alert", 1, {"message": message[:80]})
+
+
+def _principal() -> str:
+    return os.getenv("USER", "local_hotkey_user")
+
+
+def _normalize_path(raw: str) -> str:
+    cleaned = raw.strip().strip("'\"").rstrip(".?!")
+    if cleaned.startswith("~"):
+        cleaned = os.path.expanduser(cleaned)
+    elif not cleaned.startswith("/"):
+        cleaned = os.path.join(HOME, cleaned)
+    return str(Path(cleaned).expanduser().resolve())
+
+
+def _is_protected(path: str) -> bool:
+    resolved = str(Path(path).resolve())
+    return any(resolved == p or resolved.startswith(p + "/") for p in PROTECTED_PATHS)
+
+
+def _is_under_home(path: str) -> bool:
+    resolved = str(Path(path).resolve())
+    home_resolved = str(Path(HOME).resolve())
+    return resolved == home_resolved or resolved.startswith(home_resolved + "/")
+
+
+def _build_action_request(query: str) -> ActionRequest | None:
+    text = query.strip()
+    lower = text.lower()
+    principal = _principal()
+
+    if re.search(r'\b(disk\s+space|storage|disk\s+usage)\b', lower):
+        return ActionRequest(action=ACTION_DISK_USAGE, args={}, principal=principal, reason=text)
+
+    match = re.search(r'\bgit\s+status(?:\s+in\s+(.+))?$', lower)
+    if match:
+        repo = _normalize_path(match.group(1) or os.getcwd())
+        return ActionRequest(action=ACTION_GIT_STATUS, args={"repo": repo}, principal=principal, reason=text)
+
+    match = re.search(r'\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory)\s+(?:called\s+)?(.+)$', lower)
+    if match:
+        return ActionRequest(action=ACTION_CREATE_FOLDER, args={"path": _normalize_path(match.group(1))}, principal=principal, reason=text)
+
+    match = re.search(r'\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?file\s+(?:called\s+)?(.+)$', lower)
+    if match:
+        return ActionRequest(action=ACTION_CREATE_FILE, args={"path": _normalize_path(match.group(1))}, principal=principal, reason=text)
+
+    match = re.search(r'\b(?:list|show)\s+(?:files\s+)?(?:in|at)?\s*(.+)$', lower)
+    if match and match.group(1):
+        return ActionRequest(action=ACTION_LIST_PATH, args={"path": _normalize_path(match.group(1))}, principal=principal, reason=text)
+
+    match = re.search(r'\bfind\s+(.+?)\s+in\s+(.+)$', lower)
+    if match:
+        return ActionRequest(
+            action=ACTION_FIND_NAME,
+            args={"pattern": match.group(1).strip().strip("'\""), "path": _normalize_path(match.group(2))},
+            principal=principal,
+            reason=text,
         )
-        return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+    match = re.search(r'\bmove\s+(.+?)\s+to\s+(.+)$', lower)
+    if match:
+        return ActionRequest(
+            action=ACTION_MOVE_PATH,
+            args={"src": _normalize_path(match.group(1)), "dst": _normalize_path(match.group(2))},
+            principal=principal,
+            reason=text,
+        )
+
+    match = re.search(r'\bcopy\s+(.+?)\s+to\s+(.+)$', lower)
+    if match:
+        return ActionRequest(
+            action=ACTION_COPY_PATH,
+            args={"src": _normalize_path(match.group(1)), "dst": _normalize_path(match.group(2))},
+            principal=principal,
+            reason=text,
+        )
+
+    match = re.search(r'\brename\s+(.+?)\s+to\s+(.+)$', lower)
+    if match:
+        return ActionRequest(
+            action=ACTION_RENAME_PATH,
+            args={"src": _normalize_path(match.group(1)), "dst": _normalize_path(match.group(2))},
+            principal=principal,
+            reason=text,
+        )
+
+    match = re.search(r'\b(?:delete|remove)\s+(.+)$', lower)
+    if match:
+        return ActionRequest(action=ACTION_DELETE_PATH, args={"path": _normalize_path(match.group(1))}, principal=principal, reason=text)
+
+    return None
+
+
+def _policy_check(request: ActionRequest) -> PolicyDecision:
+    if request.action not in SUPPORTED_ACTIONS:
+        return PolicyDecision(False, "unsupported action")
+
+    allowed, retry_after = _rate_limiter.allow(request.principal)
+    if not allowed:
+        return PolicyDecision(False, f"rate limit exceeded; retry in {retry_after}s")
+
+    check_paths: list[str] = []
+    for key in ("path", "src", "dst", "repo"):
+        value = request.args.get(key)
+        if isinstance(value, str):
+            check_paths.append(value)
+
+    for path in check_paths:
+        if _is_protected(path):
+            return PolicyDecision(False, f"protected path blocked: {path}")
+
+    if request.action in WRITE_ACTIONS:
+        for path in check_paths:
+            if not _is_under_home(path):
+                return PolicyDecision(False, f"write action outside home blocked: {path}")
+
+    if request.action == ACTION_GIT_STATUS:
+        repo = request.args.get("repo", "")
+        if not _is_under_home(repo):
+            return PolicyDecision(False, "git status outside home blocked")
+
+    return PolicyDecision(True, "allowed", request.action in DESTRUCTIVE_ACTIONS)
+
+
+def _apply_subprocess_limits():
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (8, 8))
+    except Exception:
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    except Exception:
+        pass
+
+
+def _run_safe_process(args: list[str], timeout: int = ACTION_TIMEOUT_SECONDS) -> ActionResult:
+    started = time.time()
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            preexec_fn=_apply_subprocess_limits,
+        )
+        duration_ms = int((time.time() - started) * 1000)
+        return ActionResult(
+            ok=result.returncode == 0,
+            return_code=result.returncode,
+            stdout=result.stdout.strip(),
+            stderr=result.stderr.strip(),
+            duration_ms=duration_ms,
+            command_repr=" ".join(args),
+        )
     except subprocess.TimeoutExpired:
-        return -1, "", f"Timed out after {timeout}s"
-    except Exception as e:
-        return -1, "", str(e)
+        duration_ms = int((time.time() - started) * 1000)
+        return ActionResult(False, -1, "", f"Timed out after {timeout}s", duration_ms, " ".join(args))
+    except Exception as exc:
+        duration_ms = int((time.time() - started) * 1000)
+        return ActionResult(False, -1, "", str(exc), duration_ms, " ".join(args))
 
 
-def _spoken_result(cmd: str, rc: int, out: str, err: str) -> str:
-    if rc != 0 and not out:
-        return f"That failed: {(err or 'unknown error')[:150]}"
-    if rc == 0 and not out:
+def _execute_action_request(request: ActionRequest) -> ActionResult:
+    action = request.action
+    args = request.args
+
+    if action == ACTION_CREATE_FOLDER:
+        return _run_safe_process(["mkdir", "-p", args["path"]])
+    if action == ACTION_CREATE_FILE:
+        return _run_safe_process(["touch", args["path"]])
+    if action == ACTION_LIST_PATH:
+        return _run_safe_process(["ls", "-la", args["path"]])
+    if action == ACTION_FIND_NAME:
+        return _run_safe_process(["find", args["path"], "-maxdepth", "4", "-name", args["pattern"]])
+    if action in {ACTION_MOVE_PATH, ACTION_RENAME_PATH}:
+        return _run_safe_process(["mv", args["src"], args["dst"]])
+    if action == ACTION_COPY_PATH:
+        return _run_safe_process(["cp", "-R", args["src"], args["dst"]])
+    if action == ACTION_DELETE_PATH:
+        script = f'tell app "Finder" to delete POSIX file "{args["path"]}"'
+        return _run_safe_process(["osascript", "-e", script])
+    if action == ACTION_DISK_USAGE:
+        return _run_safe_process(["df", "-h", "/Users"])
+    if action == ACTION_GIT_STATUS:
+        return _run_safe_process(["git", "-C", args["repo"], "status", "--short"])
+
+    return ActionResult(False, -1, "", f"Unsupported action: {action}", 0, action)
+
+
+def _format_action_result(result: ActionResult) -> str:
+    if not result.ok and not result.stdout:
+        return f"That failed: {(result.stderr or 'unknown error')[:150]}"
+    if result.ok and not result.stdout:
         return "Done."
-    if out and len(out) < 120 and "\n" not in out:
-        return out
-    snippet = out[:600]
+    if result.stdout and len(result.stdout) < 120 and "\n" not in result.stdout:
+        return result.stdout
+    snippet = result.stdout[:600]
     summary = _chat(
-        system="Summarize this terminal output in 1-2 plain spoken sentences. No markdown.",
-        user=f"Command: {cmd}\nOutput:\n{snippet}",
+        system="Summarize this command output in 1-2 plain spoken sentences. No markdown.",
+        user=f"Command: {result.command_repr}\nOutput:\n{snippet}",
         temperature=0.2,
     )
-    return summary or f"Done. {len(out.splitlines())} lines of output."
+    return summary or f"Done. {len(result.stdout.splitlines())} lines of output."
+
+
+def _action_worker_loop():
+    global _failure_streak
+    while True:
+        job = _action_queue.get()
+        request = job.request
+        result = ActionResult(False, -1, "", "unknown", 0, request.action)
+
+        for attempt in range(ACTION_MAX_RETRIES + 1):
+            result = _execute_action_request(request)
+            _metric("action.duration_ms", result.duration_ms, {"action": request.action, "attempt": str(attempt)})
+            if result.ok:
+                break
+            if "Timed out" in result.stderr and attempt < ACTION_MAX_RETRIES:
+                time.sleep(0.2 * (2 ** attempt))
+                continue
+            break
+
+        if result.ok:
+            _failure_streak = 0
+        else:
+            _failure_streak += 1
+            if _failure_streak >= ALERT_FAILURE_THRESHOLD:
+                _local_alert("Consecutive action failures exceeded threshold")
+
+        job.result = result
+        _audit("action_executed", request, result=result)
+        job.done.set()
+        _action_queue.task_done()
+
+
+def _ensure_action_worker():
+    global _queue_worker_started
+    with _queue_lock:
+        if _queue_worker_started:
+            return
+        threading.Thread(target=_action_worker_loop, daemon=True).start()
+        _queue_worker_started = True
+
+
+def _confirm_destructive_action(request: ActionRequest) -> bool:
+    path = request.args.get("path", "")
+    label = path if len(path) <= 80 else path[:77] + "..."
+    speak(f"This will delete {label}. Say yes to confirm or no to cancel.", wait=True)
+    time.sleep(0.15)
+    confirmation = _global_mic.listen() if _global_mic else ""
+    return bool(re.search(r'\byes\b', confirmation.lower()))
 
 
 def handle_shell(query: str) -> str:
-    """Natural language → zsh → safety check → confirm if destructive → run → speak result."""
-    print(f"🐚 Shell: {query}")
-    speak("On it.", wait=False)
+    """Typed action execution path with policy checks, queueing, retries, audit, and approval gates."""
+    _ensure_action_worker()
+    request = _build_action_request(query)
+    if not request:
+        return "I can only run structured actions like create, list, find, move, copy, delete, disk usage, or git status."
 
-    cmd = _generate_shell_cmd(query)
-    if not cmd:
-        return "I couldn't figure out the right command for that."
-    print(f"🔧 Generated: {cmd}")
+    decision = _policy_check(request)
+    _audit("action_requested", request, decision=decision)
 
-    ok, reason = _safe_check(cmd)
-    if not ok:
-        print(f"🚫 Blocked ({reason}): {cmd!r}")
-        return "I can't do that — it would touch protected system files."
+    if not decision.allowed:
+        return f"Blocked by policy: {decision.reason}."
 
-    if _DESTRUCTIVE_RE.search(cmd):
-        short = cmd if len(cmd) <= 90 else cmd[:87] + "…"
-        speak(f"This will run: {short}. Say yes to confirm or no to cancel.", wait=True)
-        time.sleep(0.15)
-        confirmation = _global_mic.listen() if _global_mic else ""
-        if not re.search(r'\byes\b', confirmation.lower()):
-            return "Cancelled."
-        print("✅ Confirmed.")
+    if decision.requires_approval and not _confirm_destructive_action(request):
+        _audit("action_cancelled", request, decision=decision, message="destructive approval denied")
+        return "Cancelled."
 
-    print(f"▶  Running: {cmd}")
-    rc, out, err = _run_cmd(cmd)
-    print(f"   exit={rc} out={out[:80]!r} err={err[:60]!r}")
-    return _spoken_result(cmd, rc, out, err)
+    try:
+        job = ActionJob(request=request)
+        _action_queue.put(job, timeout=2)
+    except queue.Full:
+        return "System is busy. Please try again in a few seconds."
+
+    wait_timeout = ACTION_TIMEOUT_SECONDS * (ACTION_MAX_RETRIES + 1) + 3
+    completed = job.done.wait(timeout=wait_timeout)
+    if not completed or not job.result:
+        _audit("action_timeout", request, message="queue wait timeout")
+        return "The action timed out before completion."
+
+    return _format_action_result(job.result)
 
 
 # ─────────────────────────────────────────────
@@ -629,6 +952,7 @@ def main():
     print("  J.A.R.V.I.S.  —  Voice Assistant")
     print("=" * 52)
     print(f"  Model  : {MODEL} (Ollama)")
+    print("  Shell  : ENABLED (typed safe actions only)")
     print("  Hotkey : Command + Shift + J")
     print("  Quit   : Ctrl + C")
     print("=" * 52)
