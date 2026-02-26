@@ -40,6 +40,9 @@ Latency tuning:
 - Optional local package install: `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh`.
 - Trigger mode: `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hybrid`).
 - Wake backend: `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword` (default `stt_phrase`).
+- Wake guard against false triggers: `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800`.
+- Wake phrase strictness: `export JARVIS_WAKEWORD_MAX_WORDS=4`.
 - VAD profile: `export JARVIS_VAD_PROFILE=fast|balanced|robust`.
+- Classifier mode: `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`).
 - Translation target default: `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`.
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.

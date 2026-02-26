@@ -25,6 +25,9 @@
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
   - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hybrid`)
   - `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword`
+  - `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800` to ignore wake detection right after Jarvis speaks
+  - `export JARVIS_WAKEWORD_MAX_WORDS=4` for strict wake phrase filtering
+  - `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`; `llm` is slower)
   - `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`
   - `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`
 
