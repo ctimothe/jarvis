@@ -17,9 +17,16 @@
   - Get last summary: `mission report`
 - Low-latency/STT tuning:
   - `export JARVIS_LISTEN_CUE=beep` (default), `speech`, or `none`
-  - `export JARVIS_STT_BACKEND=local` (`auto` or `google` also supported)
+  - `export JARVIS_STT_BACKEND=google` (default)
+  - `export JARVIS_STT_BACKEND=local` for local Whisper
   - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
+  - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
+
+## Shell startup issue
+- If you see `command not found: compdef`, add this near the top of your `~/.zshrc`:
+  - `autoload -Uz compinit`
+  - `compinit`
 
 ## Audit and metrics
 - Audit trail: `~/.jarvis_audit/audit.jsonl`
