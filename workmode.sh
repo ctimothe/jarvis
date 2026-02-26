@@ -55,7 +55,16 @@ else
   echo "ℹ️ Optional local STT install skipped (set JARVIS_INSTALL_LOCAL_STT=1 to enable)."
 fi
 
-INSTALL_WAKEWORD="${JARVIS_INSTALL_WAKEWORD:-0}"
+WAKEWORD_BACKEND="${JARVIS_WAKEWORD_BACKEND:-openwakeword}"
+INSTALL_WAKEWORD="${JARVIS_INSTALL_WAKEWORD:-auto}"
+if [[ "$INSTALL_WAKEWORD" == "auto" ]]; then
+  if [[ "$WAKEWORD_BACKEND" == "openwakeword" ]]; then
+    INSTALL_WAKEWORD="1"
+  else
+    INSTALL_WAKEWORD="0"
+  fi
+fi
+
 if [[ "$INSTALL_WAKEWORD" == "1" ]]; then
   echo "📦 Installing optional wake-word package (openwakeword)..."
   if "$PYTHON" -m pip install --quiet openwakeword; then
