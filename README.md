@@ -14,3 +14,7 @@ Quick commands:
 Mission mode example:
 - Say: `create folder called wow then create file called wow/notes.txt then list wow`
 - Jarvis previews the plan, then waits for: `execute mission` or `cancel mission`
+
+Battery example:
+- Say: `what is the percentage of my battery health`
+- Jarvis routes to shell status and speaks charge + health summary.

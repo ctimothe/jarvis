@@ -122,6 +122,13 @@ def test_build_find_request(jarvis):
     assert request.args["path"] == "/Users/tester/documents"
 
 
+def test_build_battery_request(jarvis):
+    request = jarvis._build_action_request("what is the percentage of my battery health")
+
+    assert request is not None
+    assert request.action == jarvis.ACTION_BATTERY_STATUS
+
+
 def test_policy_blocks_protected_paths(jarvis):
     request = jarvis.ActionRequest(
         action=jarvis.ACTION_LIST_PATH,
@@ -196,3 +203,18 @@ def test_pending_mission_cancel_control(jarvis):
 
     assert response == "Mission cancelled."
     assert jarvis._peek_pending_mission() is None
+
+
+def test_classify_question_not_music(jarvis):
+    intent = jarvis._classify("what's up with the service")
+    assert intent == "QUESTION"
+
+
+def test_classify_battery_as_shell(jarvis):
+    intent = jarvis._classify("what is the percentage of my battery health")
+    assert intent == "SHELL"
+
+
+def test_classify_pause_music_as_music(jarvis):
+    intent = jarvis._classify("pause the music")
+    assert intent == "MUSIC"

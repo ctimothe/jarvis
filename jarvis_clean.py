@@ -142,6 +142,7 @@ def ask_ai(prompt: str) -> str:
             "Only the Python code beneath you can open apps, create files, run commands, etc. "
             "If asked to do something on the computer, say you will pass it to the system. "
             "NEVER claim you created, opened, deleted, or performed any action. "
+            "NEVER claim you are monitoring systems, watching services, or running in the background. "
             "NEVER write 'User:', 'Human:', or simulate a dialogue."
         ),
         user=prompt,
@@ -367,6 +368,7 @@ ACTION_RENAME_PATH = "rename_path"
 ACTION_DELETE_PATH = "delete_path"
 ACTION_DISK_USAGE = "disk_usage"
 ACTION_GIT_STATUS = "git_status"
+ACTION_BATTERY_STATUS = "battery_status"
 
 SUPPORTED_ACTIONS = {
     ACTION_CREATE_FOLDER,
@@ -379,6 +381,7 @@ SUPPORTED_ACTIONS = {
     ACTION_DELETE_PATH,
     ACTION_DISK_USAGE,
     ACTION_GIT_STATUS,
+    ACTION_BATTERY_STATUS,
 }
 
 WRITE_ACTIONS = {
@@ -560,6 +563,9 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if re.search(r'\b(disk\s+space|storage|disk\s+usage)\b', lower):
         return ActionRequest(action=ACTION_DISK_USAGE, args={}, principal=principal, reason=text)
 
+    if re.search(r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count)\b', lower):
+        return ActionRequest(action=ACTION_BATTERY_STATUS, args={}, principal=principal, reason=text)
+
     match = re.search(r'\bgit\s+status(?:\s+in\s+(.+))?$', lower)
     if match:
         repo = _normalize_path(match.group(1) or os.getcwd())
@@ -648,6 +654,8 @@ def _describe_action_request(request: ActionRequest) -> str:
         return f"delete {_shorten(args.get('path', ''))}"
     if action == ACTION_DISK_USAGE:
         return "check disk usage"
+    if action == ACTION_BATTERY_STATUS:
+        return "check battery status and health"
     if action == ACTION_GIT_STATUS:
         return f"git status in {_shorten(args.get('repo', ''))}"
     return action
@@ -776,6 +784,62 @@ def _run_safe_process(args: list[str], timeout: int = ACTION_TIMEOUT_SECONDS) ->
         return ActionResult(False, -1, "", str(exc), duration_ms, " ".join(args))
 
 
+def _extract_battery_summary(pmset_output: str, profiler_output: str) -> str:
+    parts: list[str] = []
+
+    charge_match = re.search(r"(\d+)%", pmset_output)
+    state_match = re.search(r";\s*([^;]+);", pmset_output)
+    if charge_match:
+        status = f"Battery is at {charge_match.group(1)} percent"
+        if state_match:
+            status += f", {state_match.group(1).strip()}"
+        parts.append(status + ".")
+
+    capacity_match = re.search(r"Maximum Capacity:\s*(\d+)%", profiler_output, flags=re.IGNORECASE)
+    cycle_match = re.search(r"Cycle Count:\s*(\d+)", profiler_output, flags=re.IGNORECASE)
+    condition_match = re.search(r"Condition:\s*([A-Za-z ]+)", profiler_output, flags=re.IGNORECASE)
+
+    health_bits: list[str] = []
+    if capacity_match:
+        health_bits.append(f"maximum capacity {capacity_match.group(1)} percent")
+    if cycle_match:
+        health_bits.append(f"cycle count {cycle_match.group(1)}")
+    if condition_match:
+        health_bits.append(f"condition {condition_match.group(1).strip().lower()}")
+    if health_bits:
+        parts.append("Battery health: " + ", ".join(health_bits) + ".")
+
+    return " ".join(parts).strip()
+
+
+def _run_battery_status_action() -> ActionResult:
+    started = time.time()
+    batt = _run_safe_process(["pmset", "-g", "batt"], timeout=6)
+    profiler = _run_safe_process(["system_profiler", "SPPowerDataType", "-detailLevel", "mini"], timeout=12)
+
+    summary = _extract_battery_summary(batt.stdout, profiler.stdout)
+    ok = batt.ok or profiler.ok
+    if summary:
+        return ActionResult(
+            ok=ok,
+            return_code=0 if ok else 1,
+            stdout=summary,
+            stderr=(batt.stderr + " " + profiler.stderr).strip(),
+            duration_ms=int((time.time() - started) * 1000),
+            command_repr="pmset -g batt && system_profiler SPPowerDataType -detailLevel mini",
+        )
+
+    stderr = (batt.stderr + " " + profiler.stderr).strip() or "Unable to read battery details."
+    return ActionResult(
+        ok=False,
+        return_code=1,
+        stdout="",
+        stderr=stderr,
+        duration_ms=int((time.time() - started) * 1000),
+        command_repr="pmset -g batt && system_profiler SPPowerDataType -detailLevel mini",
+    )
+
+
 def _execute_action_request(request: ActionRequest) -> ActionResult:
     action = request.action
     args = request.args
@@ -797,6 +861,8 @@ def _execute_action_request(request: ActionRequest) -> ActionResult:
         return _run_safe_process(["osascript", "-e", script])
     if action == ACTION_DISK_USAGE:
         return _run_safe_process(["df", "-h", "/Users"])
+    if action == ACTION_BATTERY_STATUS:
+        return _run_battery_status_action()
     if action == ACTION_GIT_STATUS:
         return _run_safe_process(["git", "-C", args["repo"], "status", "--short"])
 
@@ -1009,7 +1075,7 @@ def handle_shell(query: str) -> str:
 
     request = _build_action_request(query)
     if not request:
-        return "I can only run structured actions like create, list, find, move, copy, delete, disk usage, or git status."
+        return "I can run structured actions like create, list, find, move, copy, delete, disk usage, battery status, or git status."
 
     decision = _policy_check(request)
     _audit("action_requested", request, decision=decision)
@@ -1044,20 +1110,59 @@ SYSTEM    - sleep, lock, shutdown, restart, reboot the computer
 SHELL     - any file/folder operation (create, delete, move, copy, rename, list, find),
             disk space, git, brew, pip, kill/quit a process, zip/compress, system stats
 STOP      - stop talking / shut up / cancel / nevermind
+IMPORTANT - Only classify as MUSIC when the user clearly asks to control Spotify/music playback.
 QUESTION  - everything else: general knowledge, questions, conversation"""
+
+
+def _classify_by_rules(text: str) -> str | None:
+    q = text.lower().strip()
+    if not q:
+        return "QUESTION"
+
+    if re.search(r'\b(stop|shut up|quiet|cancel|never ?mind)\b', q):
+        return "STOP"
+    if re.search(r'\bwork\s*mode\b', q):
+        return "WORK_MODE"
+    if re.search(r'\b(sleep|lock|shutdown|restart|reboot)\b', q):
+        return "SYSTEM"
+    if re.search(r'\b(open|launch|start)\b', q):
+        return "OPEN"
+
+    music_command = re.search(r'\b(play|pause|skip|next|previous|shuffle|volume)\b', q)
+    music_target = re.search(r'\b(spotify|music|song|track|playlist)\b', q)
+    if music_target and music_command:
+        return "MUSIC"
+    if re.match(r'^\s*(play|pause|skip|next|previous|shuffle)\b', q):
+        return "MUSIC"
+
+    shell_markers = [
+        r'\b(create|make)\b',
+        r'\b(delete|remove)\b',
+        r'\b(move|copy|rename)\b',
+        r'\b(list|show)\s+(files|folders|directory|dir|in|at)\b',
+        r'\bfind\b',
+        r'\b(folder|directory|file)\b',
+        r'\b(disk\s+space|storage|disk\s+usage)\b',
+        r'\bgit\s+status\b',
+        r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count)\b',
+    ]
+    for pattern in shell_markers:
+        if re.search(pattern, q):
+            return "SHELL"
+
+    if re.match(r"^\s*(what|what's|whats|who|where|when|why|how|is|are|can|could|would|do)\b", q):
+        return "QUESTION"
+
+    return None
 
 
 def _classify(text: str) -> str:
     """Returns one of: OPEN MUSIC WORK_MODE SYSTEM SHELL STOP QUESTION"""
+    rule_match = _classify_by_rules(text)
+    if rule_match is not None:
+        return rule_match
+
     if not _ollama_alive():
-        # Offline fallback — fast keyword match
-        q = text.lower()
-        if re.search(r'\b(stop|shut up|quiet|cancel|never ?mind)\b', q): return "STOP"
-        if re.search(r'\b(open|launch|start)\b', q):                      return "OPEN"
-        if re.search(r'\b(play|pause|skip|next|previous|shuffle|spotify)\b', q): return "MUSIC"
-        if re.search(r'\bwork\s*mode\b', q):                               return "WORK_MODE"
-        if re.search(r'\b(sleep|lock|shutdown|restart|reboot)\b', q):     return "SYSTEM"
-        if re.search(r'\b(create|delete|move|copy|rename|list|find|folder|file|disk|git|brew|pip|kill|zip)\b', q): return "SHELL"
         return "QUESTION"
 
     raw = _chat(
