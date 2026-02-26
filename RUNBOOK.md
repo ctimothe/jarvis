@@ -18,6 +18,7 @@
 - Low-latency/STT tuning:
   - `export JARVIS_LISTEN_CUE=beep` (default), `speech`, or `none`
   - `export JARVIS_STT_BACKEND=apple_native` (default on macOS)
+  - On macOS 26+, Apple helper auto-falls back to local Whisper unless `JARVIS_FORCE_APPLE_HELPER=1`
   - `export JARVIS_STT_BACKEND=google` for cloud fallback
   - `export JARVIS_STT_BACKEND=local` for local Whisper fallback
   - `export JARVIS_APPLE_STT_LANGUAGE=en-US`

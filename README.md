@@ -36,6 +36,7 @@ Latency tuning:
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
 - STT backend defaults to `apple_native` on macOS for speed: `export JARVIS_STT_BACKEND=apple_native|google|local|auto`.
 - Apple Speech language: `export JARVIS_APPLE_STT_LANGUAGE=en-US`.
+- On macOS 26+, Apple helper is auto-disabled by default due TCC crash behavior; Jarvis falls back to local Whisper. Override only if you want to test: `export JARVIS_FORCE_APPLE_HELPER=1`.
 - Apple strict endpoint close: `export JARVIS_APPLE_STT_SILENCE_END_MS=420` and `export JARVIS_APPLE_STT_MIN_SPEECH_MS=170`.
 - Apple energy gate tuning: `export JARVIS_APPLE_STT_ENERGY_FLOOR=0.010` and `export JARVIS_APPLE_STT_ENERGY_MULTIPLIER=2.0`.
 - Local model: `export JARVIS_LOCAL_STT_MODEL=tiny.en` (or `base.en` for better accuracy).
