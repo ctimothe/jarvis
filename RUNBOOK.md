@@ -57,6 +57,13 @@
 - Primary speed KPI: `post_speech_to_response` (machine latency after you stop talking)
 - Apple STT process model: persistent daemon (`scripts/apple_stt_once.swift --daemon`) to avoid cold-start per turn
 - For strict early close, lower `JARVIS_APPLE_STT_SILENCE_END_MS` to `300-340` and raise `JARVIS_APPLE_STT_ENERGY_MULTIPLIER` to `2.2-2.6`
+- If Apple STT gets privacy-blocked, run:
+  - `tccutil reset SpeechRecognition com.jarvis.speechhelper`
+  - `tccutil reset Microphone com.jarvis.speechhelper`
+  - `tccutil reset SpeechRecognition com.apple.Terminal`
+  - `tccutil reset Microphone com.apple.Terminal`
+  - `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition'`
+  - `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'`
 - Quick inspect:
   - `tail -n 100 ~/.jarvis_audit/audit.jsonl`
   - `tail -n 100 ~/.jarvis_audit/metrics.jsonl`

@@ -54,3 +54,8 @@ Latency tuning:
 - If prompted, allow Speech Recognition + Microphone in macOS privacy settings for Apple-native STT.
 - Apple-native STT runs as a persistent local daemon process for faster follow-up turns.
 - Strict preset for fast close: `JARVIS_APPLE_STT_SILENCE_END_MS=320` and `JARVIS_APPLE_STT_ENERGY_MULTIPLIER=2.4`.
+- If Apple STT is blocked, reset permissions:
+  - `tccutil reset SpeechRecognition com.jarvis.speechhelper`
+  - `tccutil reset Microphone com.jarvis.speechhelper`
+  - `tccutil reset SpeechRecognition com.apple.Terminal`
+  - `tccutil reset Microphone com.apple.Terminal`
