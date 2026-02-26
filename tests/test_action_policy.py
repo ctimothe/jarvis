@@ -388,3 +388,20 @@ def test_stt_wakeword_phrase_is_strict(jarvis):
 
     engine_ok = jarvis.STTPhraseWakeWordEngine(_FakeMic("hey jarvis"))
     assert engine_ok.wait_for_wake() is True
+
+
+def test_openwakeword_engine_falls_back_cleanly(jarvis):
+    class _Fallback(jarvis.WakeWordEngine):
+        def __init__(self):
+            self.calls = 0
+
+        def wait_for_wake(self) -> bool:
+            self.calls += 1
+            return True
+
+    fallback = _Fallback()
+    engine = jarvis.OpenWakeWordEngine(fallback=fallback)
+    engine._available = False
+    assert engine.wait_for_wake() is True
+    assert fallback.calls == 1
+    engine.close()
