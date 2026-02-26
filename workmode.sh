@@ -56,9 +56,10 @@ else
 fi
 
 WAKEWORD_BACKEND="${JARVIS_WAKEWORD_BACKEND:-openwakeword}"
+TRIGGER_MODE="${JARVIS_TRIGGER_MODE:-hotkey}"
 INSTALL_WAKEWORD="${JARVIS_INSTALL_WAKEWORD:-auto}"
 if [[ "$INSTALL_WAKEWORD" == "auto" ]]; then
-  if [[ "$WAKEWORD_BACKEND" == "openwakeword" ]]; then
+  if [[ "$WAKEWORD_BACKEND" == "openwakeword" ]] && [[ "$TRIGGER_MODE" != "hotkey" ]]; then
     INSTALL_WAKEWORD="1"
   else
     INSTALL_WAKEWORD="0"
