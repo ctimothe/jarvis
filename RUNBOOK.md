@@ -26,7 +26,9 @@
   - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
   - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`)
-  - `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword`
+  - `export JARVIS_WAKEWORD_BACKEND=openwakeword|stt_phrase` (default `openwakeword`)
+  - `export JARVIS_WAKEWORD_THRESHOLD=0.55` (`0.65` stricter, fewer false wakes)
+  - `export JARVIS_WAKEWORD_POLL_SECONDS=0.8` (lower = less CPU, slower wake)
   - `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800` to ignore wake detection right after Jarvis speaks
   - `export JARVIS_WAKEWORD_MAX_WORDS=4` for strict wake phrase filtering
   - `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`; `llm` is slower)
@@ -51,6 +53,7 @@
 - Audit trail: `~/.jarvis_audit/audit.jsonl`
 - Metrics stream: `~/.jarvis_audit/metrics.jsonl`
 - Primary speed KPI: `post_speech_to_response` (machine latency after you stop talking)
+- Apple STT process model: persistent daemon (`scripts/apple_stt_once.swift --daemon`) to avoid cold-start per turn
 - Quick inspect:
   - `tail -n 100 ~/.jarvis_audit/audit.jsonl`
   - `tail -n 100 ~/.jarvis_audit/metrics.jsonl`

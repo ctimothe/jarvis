@@ -40,7 +40,9 @@ Latency tuning:
 - End-of-speech cutoff: `export JARVIS_SILENCE_END_MS=300` (lower = faster, higher = safer).
 - Optional local package install: `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh`.
 - Trigger mode: `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`).
-- Wake backend: `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword` (default `stt_phrase`).
+- Wake backend: `export JARVIS_WAKEWORD_BACKEND=openwakeword|stt_phrase` (default `openwakeword`).
+- Wake sensitivity: `export JARVIS_WAKEWORD_THRESHOLD=0.55` (higher = stricter).
+- Wake polling window: `export JARVIS_WAKEWORD_POLL_SECONDS=0.8`.
 - Wake guard against false triggers: `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800`.
 - Wake phrase strictness: `export JARVIS_WAKEWORD_MAX_WORDS=4`.
 - VAD profile: `export JARVIS_VAD_PROFILE=fast|balanced|robust`.
@@ -48,3 +50,4 @@ Latency tuning:
 - Translation target default: `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`.
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.
 - If prompted, allow Speech Recognition + Microphone in macOS privacy settings for Apple-native STT.
+- Apple-native STT runs as a persistent local daemon process for faster follow-up turns.
