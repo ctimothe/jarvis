@@ -25,8 +25,11 @@ jobs:
       - name: Run unit tests
         run: pytest -q
 
+      - name: Run latency benchmark
+        run: python scripts/benchmark_latency.py
+
       - name: Shell syntax checks
         run: bash -n workmode.sh status.sh stopwork.sh scripts/reset_state.sh
 
       - name: Python syntax checks
-        run: python -m py_compile jarvis_clean.py runner.py dev_tasks.py
+        run: python -m py_compile jarvis_clean.py runner.py dev_tasks.py tests/test_action_policy.py tests/test_perf_latency.py
