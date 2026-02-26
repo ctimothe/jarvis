@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import importlib
+import sys
+import types
+
+import pytest
+
+
+def _install_dependency_stubs() -> None:
+    requests_mod = types.ModuleType("requests")
+
+    class _Timeout(Exception):
+        pass
+
+    requests_mod.exceptions = types.SimpleNamespace(Timeout=_Timeout)
+    requests_mod.get = lambda *args, **kwargs: types.SimpleNamespace(status_code=503)
+    requests_mod.post = lambda *args, **kwargs: types.SimpleNamespace(status_code=503, json=lambda: {})
+
+    sr_mod = types.ModuleType("speech_recognition")
+
+    class _Recognizer:
+        def recognize_google(self, *args, **kwargs):
+            return ""
+
+    class _AudioData:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _UnknownValueError(Exception):
+        pass
+
+    class _RequestError(Exception):
+        pass
+
+    sr_mod.Recognizer = _Recognizer
+    sr_mod.AudioData = _AudioData
+    sr_mod.UnknownValueError = _UnknownValueError
+    sr_mod.RequestError = _RequestError
+
+    pyaudio_mod = types.ModuleType("pyaudio")
+
+    class _PyAudio:
+        def open(self, *args, **kwargs):
+            raise RuntimeError("audio disabled for tests")
+
+    pyaudio_mod.PyAudio = _PyAudio
+    pyaudio_mod.paInt16 = 8
+
+    webrtcvad_mod = types.ModuleType("webrtcvad")
+
+    class _Vad:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def is_speech(self, *args, **kwargs):
+            return False
+
+    webrtcvad_mod.Vad = _Vad
+
+    keyboard_mod = types.ModuleType("keyboard")
+    keyboard_mod.Key = types.SimpleNamespace(
+        cmd=object(),
+        cmd_l=object(),
+        cmd_r=object(),
+        shift=object(),
+        shift_l=object(),
+        shift_r=object(),
+    )
+
+    class _KeyCode:
+        def __init__(self, char: str | None = None):
+            self.char = char
+
+    class _Listener:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    keyboard_mod.KeyCode = _KeyCode
+    keyboard_mod.Listener = _Listener
+
+    pynput_mod = types.ModuleType("pynput")
+    pynput_mod.keyboard = keyboard_mod
+
+    sys.modules["requests"] = requests_mod
+    sys.modules["speech_recognition"] = sr_mod
+    sys.modules["pyaudio"] = pyaudio_mod
+    sys.modules["webrtcvad"] = webrtcvad_mod
+    sys.modules["pynput"] = pynput_mod
+
+
+@pytest.fixture()
+def jarvis(monkeypatch):
+    _install_dependency_stubs()
+    module = importlib.import_module("jarvis_clean")
+    module = importlib.reload(module)
+
+    monkeypatch.setattr(module, "HOME", "/Users/tester")
+    monkeypatch.setattr(module, "_rate_limiter", module.FixedWindowRateLimiter(max_per_minute=9999))
+    return module
+
+
+def test_build_create_folder_request(jarvis):
+    request = jarvis._build_action_request("create folder called demo")
+
+    assert request is not None
+    assert request.action == jarvis.ACTION_CREATE_FOLDER
+    assert request.args["path"] == "/Users/tester/demo"
+
+
+def test_build_find_request(jarvis):
+    request = jarvis._build_action_request("find report.txt in documents")
+
+    assert request is not None
+    assert request.action == jarvis.ACTION_FIND_NAME
+    assert request.args["pattern"] == "report.txt"
+    assert request.args["path"] == "/Users/tester/documents"
+
+
+def test_policy_blocks_protected_paths(jarvis):
+    request = jarvis.ActionRequest(
+        action=jarvis.ACTION_LIST_PATH,
+        args={"path": "/System/Library"},
+        principal="tester",
+        reason="test",
+    )
+
+    decision = jarvis._policy_check(request)
+
+    assert decision.allowed is False
+    assert "protected path blocked" in decision.reason
+
+
+def test_policy_blocks_write_outside_home(jarvis):
+    request = jarvis.ActionRequest(
+        action=jarvis.ACTION_CREATE_FILE,
+        args={"path": "/tmp/demo.txt"},
+        principal="tester",
+        reason="test",
+    )
+
+    decision = jarvis._policy_check(request)
+
+    assert decision.allowed is False
+    assert "outside home blocked" in decision.reason
+
+
+def test_policy_requires_approval_for_delete(jarvis):
+    request = jarvis.ActionRequest(
+        action=jarvis.ACTION_DELETE_PATH,
+        args={"path": "/Users/tester/demo.txt"},
+        principal="tester",
+        reason="test",
+    )
+
+    decision = jarvis._policy_check(request)
+
+    assert decision.allowed is True
+    assert decision.requires_approval is True

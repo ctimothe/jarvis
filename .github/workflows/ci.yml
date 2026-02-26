@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run unit tests
+        run: pytest -q
+
+      - name: Shell syntax checks
+        run: bash -n workmode.sh status.sh stopwork.sh scripts/reset_state.sh
+
+      - name: Python syntax checks
+        run: python -m py_compile jarvis_clean.py runner.py dev_tasks.py
