@@ -50,19 +50,33 @@ LISTEN_CUE_MODE   = os.getenv("JARVIS_LISTEN_CUE", "beep").strip().lower()
 STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "google").strip().lower()  # auto|local|google
 LOCAL_STT_MODEL   = os.getenv("JARVIS_LOCAL_STT_MODEL", "tiny.en").strip()
 LOCAL_STT_COMPUTE = os.getenv("JARVIS_LOCAL_STT_COMPUTE", "int8").strip()
+TRIGGER_MODE      = os.getenv("JARVIS_TRIGGER_MODE", "hybrid").strip().lower()  # hotkey|wake|hybrid
+VAD_PROFILE       = os.getenv("JARVIS_VAD_PROFILE", "fast").strip().lower()  # fast|balanced|robust
+WAKEWORD_BACKEND  = os.getenv("JARVIS_WAKEWORD_BACKEND", "stt_phrase").strip().lower()
+TRANSLATION_BACKEND = os.getenv("JARVIS_TRANSLATION_BACKEND", "local").strip().lower()
+TRANSLATION_DEFAULT_TARGET = os.getenv("JARVIS_TRANSLATION_DEFAULT_TARGET", "spanish").strip().lower()
+RESPONSE_STYLE    = os.getenv("JARVIS_RESPONSE_STYLE", "truth_concise").strip().lower()  # truth_concise|balanced
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
 VAD_FRAME_MS         = 30      # ms per frame  (10 / 20 / 30 only)
 VAD_FRAME_SAMPLES    = int(VAD_SAMPLE_RATE * VAD_FRAME_MS / 1000)   # 480 samples
-VAD_AGGRESSIVENESS   = 2       # 0=lenient … 3=aggressive non-speech filter
 PRE_ROLL_FRAMES      = 10      # ~300ms buffered before speech start (catches first syllable)
-SILENCE_END_FRAMES   = max(6, int(int(os.getenv("JARVIS_SILENCE_END_MS", "360")) / VAD_FRAME_MS))
 MIN_SPEECH_FRAMES    = 3       # ignore clicks / pops shorter than this
 MAX_RECORD_SECONDS   = 30      # safety ceiling
 STARTUP_TIMEOUT_S    = 8       # give up if no speech within this time
 LOCAL_STT_PARTIAL_MIN_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_MIN_MS", "800"))
 LOCAL_STT_PARTIAL_INTERVAL_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_INTERVAL_MS", "450"))
+
+_VAD_PROFILE_PRESETS = {
+    "fast": {"aggressiveness": 2, "silence_end_ms": 280},
+    "balanced": {"aggressiveness": 2, "silence_end_ms": 420},
+    "robust": {"aggressiveness": 3, "silence_end_ms": 620},
+}
+_vad_profile = _VAD_PROFILE_PRESETS.get(VAD_PROFILE, _VAD_PROFILE_PRESETS["fast"])
+VAD_AGGRESSIVENESS = int(os.getenv("JARVIS_VAD_AGGRESSIVENESS", str(_vad_profile["aggressiveness"])))
+_silence_end_ms = int(os.getenv("JARVIS_SILENCE_END_MS", str(_vad_profile["silence_end_ms"])))
+SILENCE_END_FRAMES = max(6, int(_silence_end_ms / VAD_FRAME_MS))
 
 
 # ─────────────────────────────────────────────
@@ -147,8 +161,19 @@ def ask_ai(prompt: str) -> str:
         _start_ollama()
         if not _ollama_alive():
             return "The AI is offline. Make sure Ollama is running."
-    return _chat(
-        system=(
+    if RESPONSE_STYLE == "truth_concise":
+        system_prompt = (
+            "You are J.A.R.V.I.S., a voice assistant. "
+            "Answer in plain spoken English, maximum 1 sentence, no markdown. "
+            "Be factual and concise. "
+            "If unsure, say you cannot verify it. "
+            "CRITICAL: You cannot perform actions on the computer yourself. "
+            "NEVER claim you created, opened, deleted, monitored, or performed actions. "
+            "NEVER invent live system state."
+        )
+        temperature = 0.1
+    else:
+        system_prompt = (
             "You are J.A.R.V.I.S., a voice assistant. "
             "Answer in plain spoken English, maximum 3 sentences, no markdown. "
             "CRITICAL: You cannot perform actions on the computer yourself. "
@@ -157,10 +182,10 @@ def ask_ai(prompt: str) -> str:
             "NEVER claim you created, opened, deleted, or performed any action. "
             "NEVER claim you are monitoring systems, watching services, or running in the background. "
             "NEVER write 'User:', 'Human:', or simulate a dialogue."
-        ),
-        user=prompt,
-        temperature=0.4,
-    )
+        )
+        temperature = 0.3
+
+    return _chat(system=system_prompt, user=prompt, temperature=temperature)
 
 
 # ─────────────────────────────────────────────
@@ -194,6 +219,7 @@ class SmartMic:
         self._local_enabled = False
         self._partial_min_frames = max(8, int(LOCAL_STT_PARTIAL_MIN_MS / VAD_FRAME_MS))
         self._partial_interval_frames = max(6, int(LOCAL_STT_PARTIAL_INTERVAL_MS / VAD_FRAME_MS))
+        self.last_capture_info: dict[str, int] = {}
         self._init_stt_backend()
 
     def _init_stt_backend(self):
@@ -256,7 +282,8 @@ class SmartMic:
             print(f"⚠️  STT error: {exc}")
             return ""
 
-    def listen(self) -> str:
+    def listen(self, max_record_seconds: int | None = None, startup_timeout_s: int | None = None) -> str:
+        started_at = time.time()
         stream = self._pa.open(
             format=pyaudio.paInt16,
             channels=1,
@@ -274,8 +301,9 @@ class SmartMic:
         total        = 0
         speech_frames = 0
         last_partial_text = ""
-        max_frames   = int(MAX_RECORD_SECONDS * 1000 / VAD_FRAME_MS)
-        wait_frames  = int(STARTUP_TIMEOUT_S  * 1000 / VAD_FRAME_MS)
+        max_frames   = int((max_record_seconds or MAX_RECORD_SECONDS) * 1000 / VAD_FRAME_MS)
+        wait_frames  = int((startup_timeout_s or STARTUP_TIMEOUT_S) * 1000 / VAD_FRAME_MS)
+        speech_started_at: float | None = None
 
         print("👂 Listening (VAD)…")
         try:
@@ -294,6 +322,7 @@ class SmartMic:
                         triggered = True
                         speech_buf.extend(pre_roll)   # include pre-roll
                         speech_frames = len(pre_roll)
+                        speech_started_at = time.time()
                         silence_ct = 0
                         print("🗨  Capturing speech…")
                     elif total > wait_frames:          # no speech in time
@@ -323,8 +352,10 @@ class SmartMic:
             stream.close()
 
         if not triggered or len(speech_buf) < MIN_SPEECH_FRAMES:
+            self.last_capture_info = {}
             return ""
 
+        speech_ended_at = time.time()
         raw = b"".join(speech_buf)
         print("🔄 Recognising…")
 
@@ -333,11 +364,19 @@ class SmartMic:
             text = self._decode_local(raw, partial=False)
             print(f'📝 You said: "{text}"')
             if text:
+                self.last_capture_info = {
+                    "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
+                    "speech_end_to_transcript_ms": int((time.time() - speech_ended_at) * 1000),
+                }
                 return text
 
         text = self._decode_google(raw)
         if text:
             print(f'📝 You said: "{text}"')
+        self.last_capture_info = {
+            "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
+            "speech_end_to_transcript_ms": int((time.time() - speech_ended_at) * 1000),
+        }
         return text
 
 
@@ -470,6 +509,12 @@ ACTION_DELETE_PATH = "delete_path"
 ACTION_DISK_USAGE = "disk_usage"
 ACTION_GIT_STATUS = "git_status"
 ACTION_BATTERY_STATUS = "battery_status"
+ACTION_VOLUME_STATUS = "volume_status"
+ACTION_NOW_PLAYING = "now_playing"
+ACTION_WIFI_STATUS = "wifi_status"
+ACTION_TIME_STATUS = "time_status"
+ACTION_ACTIVE_APP = "active_app"
+ACTION_TRANSLATE_TEXT = "translate_text"
 
 SUPPORTED_ACTIONS = {
     ACTION_CREATE_FOLDER,
@@ -483,6 +528,12 @@ SUPPORTED_ACTIONS = {
     ACTION_DISK_USAGE,
     ACTION_GIT_STATUS,
     ACTION_BATTERY_STATUS,
+    ACTION_VOLUME_STATUS,
+    ACTION_NOW_PLAYING,
+    ACTION_WIFI_STATUS,
+    ACTION_TIME_STATUS,
+    ACTION_ACTIVE_APP,
+    ACTION_TRANSLATE_TEXT,
 }
 
 WRITE_ACTIONS = {
@@ -551,6 +602,86 @@ class MissionPlan:
     created_at: float = field(default_factory=time.time)
 
 
+class TranslatorBackend:
+    def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        raise NotImplementedError
+
+
+class LocalDictionaryTranslator(TranslatorBackend):
+    _phrases = {
+        ("english", "spanish"): {
+            "hello": "hola",
+            "how are you": "como estas",
+            "what is up": "que pasa",
+            "good morning": "buenos dias",
+            "good night": "buenas noches",
+            "thank you": "gracias",
+        },
+        ("english", "french"): {
+            "hello": "bonjour",
+            "how are you": "comment ca va",
+            "good morning": "bonjour",
+            "good night": "bonne nuit",
+            "thank you": "merci",
+        },
+    }
+
+    def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        src = source_lang.lower().strip()
+        dst = target_lang.lower().strip()
+        key = (src, dst)
+        lookup = self._phrases.get(key, {})
+        normalized = text.lower().strip()
+        if normalized in lookup:
+            return lookup[normalized]
+
+        # Best-effort word-by-word fallback for small local dictionary.
+        word_map = {}
+        for phrase, translated in lookup.items():
+            if " " not in phrase and " " not in translated:
+                word_map[phrase] = translated
+        if word_map:
+            translated_words = [word_map.get(token.lower(), token) for token in text.split()]
+            return " ".join(translated_words)
+        return ""
+
+
+class WakeWordEngine:
+    def wait_for_wake(self) -> bool:
+        raise NotImplementedError
+
+
+class STTPhraseWakeWordEngine(WakeWordEngine):
+    def __init__(self, mic: "SmartMic"):
+        self._mic = mic
+
+    def wait_for_wake(self) -> bool:
+        heard = self._mic.listen(max_record_seconds=4, startup_timeout_s=4)
+        if not heard:
+            return False
+        return bool(re.search(r"\b(jarvis|hey jarvis|hello jarvis|yo jarvis)\b", heard.lower()))
+
+
+class OpenWakeWordEngine(WakeWordEngine):
+    def __init__(self, fallback: WakeWordEngine):
+        self._fallback = fallback
+        self._available = False
+        try:
+            from openwakeword.model import Model  # type: ignore
+            self._model = Model()
+            self._available = True
+        except Exception:
+            self._model = None
+
+    def wait_for_wake(self) -> bool:
+        # Fallback path keeps wake-word usable without optional dependency.
+        if not self._available:
+            return self._fallback.wait_for_wake()
+        # In v1, use fallback STT phrase even when model exists to avoid adding
+        # a second concurrent audio capture path; openWakeWord path is reserved.
+        return self._fallback.wait_for_wake()
+
+
 class FixedWindowRateLimiter:
     def __init__(self, max_per_minute: int):
         self.max_per_minute = max_per_minute
@@ -578,6 +709,15 @@ _failure_streak = 0
 _pending_mission: MissionPlan | None = None
 _pending_mission_lock = threading.Lock()
 _last_mission_report = "No mission has run yet."
+_translator_backend: TranslatorBackend | None = None
+_translator_lock = threading.Lock()
+
+_LATENCY_BUDGET_MS = {
+    "cue_to_speech_start": 250,
+    "speech_end_to_transcript": 700,
+    "transcript_to_response": 500,
+    "roundtrip_total": 1200,
+}
 
 
 def _ensure_audit_dir():
@@ -632,6 +772,28 @@ def _local_alert(message: str):
     _metric("alert", 1, {"message": message[:80]})
 
 
+def _latency_metric(stage: str, value_ms: int):
+    _metric("latency.stage_ms", value_ms, {"stage": stage})
+    budget = _LATENCY_BUDGET_MS.get(stage)
+    if budget and value_ms > budget:
+        print(f"⚠️  Latency warning: {stage}={value_ms}ms (budget {budget}ms)")
+
+
+def _get_translator_backend() -> TranslatorBackend:
+    global _translator_backend
+    with _translator_lock:
+        if _translator_backend is not None:
+            return _translator_backend
+        # v1 local-core uses a local translator first.
+        _translator_backend = LocalDictionaryTranslator()
+        return _translator_backend
+
+
+def _translate_text_local(text: str, target_lang: str, source_lang: str = "english") -> str:
+    translator = _get_translator_backend()
+    return translator.translate(text=text, source_lang=source_lang, target_lang=target_lang)
+
+
 def _principal() -> str:
     return os.getenv("USER", "local_hotkey_user")
 
@@ -656,16 +818,67 @@ def _is_under_home(path: str) -> bool:
     return resolved == home_resolved or resolved.startswith(home_resolved + "/")
 
 
+def _parse_translation_request(query: str) -> tuple[str, str, str] | None:
+    raw = query.strip()
+    lower = raw.lower()
+
+    # translate "hello" to spanish
+    quoted = re.search(r'translate\s+"(.+?)"\s+to\s+([a-zA-Z]+)', raw, flags=re.IGNORECASE)
+    if quoted:
+        return quoted.group(1).strip(), "english", quoted.group(2).strip().lower()
+
+    # translate hello to spanish
+    plain = re.search(r'translate\s+(.+?)\s+to\s+([a-zA-Z]+)$', raw, flags=re.IGNORECASE)
+    if plain:
+        return plain.group(1).strip().strip("'\""), "english", plain.group(2).strip().lower()
+
+    # say this in spanish: hello
+    say_in = re.search(r'say\s+this\s+in\s+([a-zA-Z]+)\s*[:,-]?\s*(.+)$', raw, flags=re.IGNORECASE)
+    if say_in:
+        return say_in.group(2).strip().strip("'\""), "english", say_in.group(1).strip().lower()
+
+    if lower.startswith("translate ") and " to " not in lower:
+        text = raw[len("translate "):].strip().strip("'\"")
+        if text:
+            return text, "english", TRANSLATION_DEFAULT_TARGET
+    return None
+
+
 def _build_action_request(query: str) -> ActionRequest | None:
     text = query.strip()
     lower = text.lower()
     principal = _principal()
 
+    parsed_translation = _parse_translation_request(text)
+    if parsed_translation:
+        source_text, source_lang, target_lang = parsed_translation
+        return ActionRequest(
+            action=ACTION_TRANSLATE_TEXT,
+            args={"text": source_text, "source_lang": source_lang, "target_lang": target_lang},
+            principal=principal,
+            reason=text,
+        )
+
     if re.search(r'\b(disk\s+space|storage|disk\s+usage)\b', lower):
         return ActionRequest(action=ACTION_DISK_USAGE, args={}, principal=principal, reason=text)
 
-    if re.search(r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count)\b', lower):
+    if re.search(r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count|charging|power adapter|ac attached)\b', lower):
         return ActionRequest(action=ACTION_BATTERY_STATUS, args={}, principal=principal, reason=text)
+
+    if re.search(r'\b(volume level|what.*volume|volume status|current volume|sound level)\b', lower):
+        return ActionRequest(action=ACTION_VOLUME_STATUS, args={}, principal=principal, reason=text)
+
+    if re.search(r'\b(what song|song.*playing|now playing|currently playing|track playing|current song)\b', lower):
+        return ActionRequest(action=ACTION_NOW_PLAYING, args={}, principal=principal, reason=text)
+
+    if re.search(r'\b(wi[- ]?fi|wireless network|network name|network am i on|what network|ssid)\b', lower):
+        return ActionRequest(action=ACTION_WIFI_STATUS, args={}, principal=principal, reason=text)
+
+    if re.search(r'\b(what time|time now|current time|date today|today.?s date)\b', lower):
+        return ActionRequest(action=ACTION_TIME_STATUS, args={}, principal=principal, reason=text)
+
+    if re.search(r'\b(active app|frontmost app|which app.*open|focused app|what app is active)\b', lower):
+        return ActionRequest(action=ACTION_ACTIVE_APP, args={}, principal=principal, reason=text)
 
     match = re.search(r'\bgit\s+status(?:\s+in\s+(.+))?$', lower)
     if match:
@@ -757,6 +970,18 @@ def _describe_action_request(request: ActionRequest) -> str:
         return "check disk usage"
     if action == ACTION_BATTERY_STATUS:
         return "check battery status and health"
+    if action == ACTION_VOLUME_STATUS:
+        return "check output volume"
+    if action == ACTION_NOW_PLAYING:
+        return "check current song"
+    if action == ACTION_WIFI_STATUS:
+        return "check wifi status"
+    if action == ACTION_TIME_STATUS:
+        return "check current date and time"
+    if action == ACTION_ACTIVE_APP:
+        return "check active app"
+    if action == ACTION_TRANSLATE_TEXT:
+        return f"translate text to {args.get('target_lang', TRANSLATION_DEFAULT_TARGET)}"
     if action == ACTION_GIT_STATUS:
         return f"git status in {_shorten(args.get('repo', ''))}"
     return action
@@ -941,6 +1166,128 @@ def _run_battery_status_action() -> ActionResult:
     )
 
 
+def _run_volume_status_action() -> ActionResult:
+    started = time.time()
+    script = 'output volume of (get volume settings) & "|" & output muted of (get volume settings)'
+    result = _run_safe_process(["osascript", "-e", script], timeout=6)
+    if result.ok and result.stdout:
+        try:
+            volume_raw, muted_raw = result.stdout.split("|", maxsplit=1)
+            volume = volume_raw.strip()
+            muted = muted_raw.strip().lower() == "true"
+            summary = f"Output volume is {volume} percent. {'Muted.' if muted else 'Not muted.'}"
+            return ActionResult(True, 0, summary, "", int((time.time() - started) * 1000), result.command_repr)
+        except Exception:
+            pass
+    return result
+
+
+def _run_now_playing_action() -> ActionResult:
+    started = time.time()
+    spotify_script = (
+        'try\n'
+        'tell application "Spotify" to if player state is playing then return name of current track & " by " & artist of current track\n'
+        'end try'
+    )
+    spotify = _run_safe_process(["osascript", "-e", spotify_script], timeout=6)
+    if spotify.ok and spotify.stdout:
+        return ActionResult(True, 0, f"Now playing: {spotify.stdout}.", "", int((time.time() - started) * 1000), spotify.command_repr)
+
+    music_script = (
+        'try\n'
+        'tell application "Music" to if player state is playing then return name of current track & " by " & artist of current track\n'
+        'end try'
+    )
+    music = _run_safe_process(["osascript", "-e", music_script], timeout=6)
+    if music.ok and music.stdout:
+        return ActionResult(True, 0, f"Now playing: {music.stdout}.", "", int((time.time() - started) * 1000), music.command_repr)
+
+    return ActionResult(
+        ok=False,
+        return_code=1,
+        stdout="",
+        stderr="Could not verify a currently playing song.",
+        duration_ms=int((time.time() - started) * 1000),
+        command_repr="osascript now-playing",
+    )
+
+
+def _detect_wifi_device() -> str:
+    ports = _run_safe_process(["networksetup", "-listallhardwareports"], timeout=8)
+    if not ports.ok:
+        return "en0"
+    blocks = ports.stdout.split("\n\n")
+    for block in blocks:
+        if "Hardware Port: Wi-Fi" in block:
+            for line in block.splitlines():
+                if line.strip().startswith("Device:"):
+                    return line.split(":", maxsplit=1)[1].strip()
+    return "en0"
+
+
+def _run_wifi_status_action() -> ActionResult:
+    started = time.time()
+    device = _detect_wifi_device()
+    status = _run_safe_process(["networksetup", "-getairportnetwork", device], timeout=8)
+    if status.ok and status.stdout:
+        line = status.stdout.strip()
+        if "Current Wi-Fi Network" in line:
+            ssid = line.split(":", maxsplit=1)[1].strip()
+            summary = f"Wi-Fi is connected to {ssid}."
+        else:
+            summary = f"Wi-Fi status: {line}."
+        return ActionResult(True, 0, summary, "", int((time.time() - started) * 1000), status.command_repr)
+    return ActionResult(False, 1, "", "Could not verify Wi-Fi status.", int((time.time() - started) * 1000), status.command_repr)
+
+
+def _run_time_status_action() -> ActionResult:
+    now = datetime.datetime.now()
+    return ActionResult(
+        ok=True,
+        return_code=0,
+        stdout=now.strftime("It is %I:%M %p on %A, %B %d, %Y."),
+        stderr="",
+        duration_ms=1,
+        command_repr="local datetime",
+    )
+
+
+def _run_active_app_action() -> ActionResult:
+    script = 'tell application "System Events" to get name of first process whose frontmost is true'
+    result = _run_safe_process(["osascript", "-e", script], timeout=6)
+    if result.ok and result.stdout:
+        return ActionResult(True, 0, f"Active app is {result.stdout}.", "", result.duration_ms, result.command_repr)
+    return ActionResult(False, 1, "", "Could not verify active app.", result.duration_ms, result.command_repr)
+
+
+def _run_translate_action(args: dict[str, Any]) -> ActionResult:
+    started = time.time()
+    source_text = str(args.get("text", "")).strip()
+    source_lang = str(args.get("source_lang", "english")).strip().lower()
+    target_lang = str(args.get("target_lang", TRANSLATION_DEFAULT_TARGET)).strip().lower()
+    if not source_text:
+        return ActionResult(False, 1, "", "Missing text to translate.", int((time.time() - started) * 1000), "translate")
+
+    translated = _translate_text_local(text=source_text, source_lang=source_lang, target_lang=target_lang)
+    if translated:
+        return ActionResult(
+            True,
+            0,
+            f"In {target_lang}: {translated}",
+            "",
+            int((time.time() - started) * 1000),
+            f"translate {source_lang}->{target_lang}",
+        )
+    return ActionResult(
+        False,
+        1,
+        "",
+        f"Could not verify local translation for {source_lang} to {target_lang}.",
+        int((time.time() - started) * 1000),
+        f"translate {source_lang}->{target_lang}",
+    )
+
+
 def _execute_action_request(request: ActionRequest) -> ActionResult:
     action = request.action
     args = request.args
@@ -964,6 +1311,18 @@ def _execute_action_request(request: ActionRequest) -> ActionResult:
         return _run_safe_process(["df", "-h", "/Users"])
     if action == ACTION_BATTERY_STATUS:
         return _run_battery_status_action()
+    if action == ACTION_VOLUME_STATUS:
+        return _run_volume_status_action()
+    if action == ACTION_NOW_PLAYING:
+        return _run_now_playing_action()
+    if action == ACTION_WIFI_STATUS:
+        return _run_wifi_status_action()
+    if action == ACTION_TIME_STATUS:
+        return _run_time_status_action()
+    if action == ACTION_ACTIVE_APP:
+        return _run_active_app_action()
+    if action == ACTION_TRANSLATE_TEXT:
+        return _run_translate_action(args)
     if action == ACTION_GIT_STATUS:
         return _run_safe_process(["git", "-C", args["repo"], "status", "--short"])
 
@@ -1176,7 +1535,10 @@ def handle_shell(query: str) -> str:
 
     request = _build_action_request(query)
     if not request:
-        return "I can run structured actions like create, list, find, move, copy, delete, disk usage, battery status, or git status."
+        return (
+            "I can run structured actions like create, list, find, move, copy, delete, "
+            "disk usage, battery, volume, now playing, wifi, time, active app, translate, or git status."
+        )
 
     decision = _policy_check(request)
     _audit("action_requested", request, decision=decision)
@@ -1233,6 +1595,8 @@ def _classify_by_rules(text: str) -> str | None:
     music_target = re.search(r'\b(spotify|music|song|track|playlist)\b', q)
     if music_target and music_command:
         return "MUSIC"
+    if re.search(r'\bvolume\s+(up|down)\b', q):
+        return "MUSIC"
     if re.match(r'^\s*(play|pause|skip|next|previous|shuffle)\b', q):
         return "MUSIC"
 
@@ -1245,7 +1609,13 @@ def _classify_by_rules(text: str) -> str | None:
         r'\b(folder|directory|file)\b',
         r'\b(disk\s+space|storage|disk\s+usage)\b',
         r'\bgit\s+status\b',
-        r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count)\b',
+        r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count|charging|power adapter)\b',
+        r'\b(volume level|current volume|sound level|mute status)\b',
+        r'\b(now playing|what song|song.*playing|currently playing|current song)\b',
+        r'\b(wi[- ]?fi|ssid|network name|network am i on|what network)\b',
+        r'\b(what time|date today|active app|frontmost app|what app is active)\b',
+        r'^\s*translate\b',
+        r'^\s*say this in\b',
     ]
     for pattern in shell_markers:
         if re.search(pattern, q):
@@ -1279,6 +1649,21 @@ def _classify(text: str) -> str:
     return first if first in valid else "QUESTION"
 
 
+def _deterministic_intent_layer(text: str) -> str | None:
+    if _build_mission_plan(text) is not None or _build_action_request(text) is not None:
+        return handle_shell(text)
+    return None
+
+
+def _truth_policy_guard(text: str) -> str | None:
+    if RESPONSE_STYLE != "truth_concise":
+        return None
+    q = text.lower()
+    if re.search(r"\b(monitor|monitoring|cpu|ram|memory|service status|system status|any news)\b", q):
+        return "I couldn't verify live system status from that request. Ask a specific command like battery, volume, song, wifi, time, or active app."
+    return None
+
+
 # ─────────────────────────────────────────────
 # ROUTER
 # ─────────────────────────────────────────────
@@ -1291,10 +1676,9 @@ def route(text: str) -> str:
     if pending_control is not None:
         return pending_control
 
-    # Route structured actions directly to the shell handler to avoid intent
-    # misclassification for command-like phrasing.
-    if _build_mission_plan(text) is not None or _build_action_request(text) is not None:
-        return handle_shell(text)
+    deterministic = _deterministic_intent_layer(text)
+    if deterministic is not None:
+        return deterministic
 
     intent = _classify(text)
     print(f"🧠 Intent: {intent}")
@@ -1312,6 +1696,9 @@ def route(text: str) -> str:
         return handle_system(text)
     if intent == "SHELL":
         return handle_shell(text)
+    guarded = _truth_policy_guard(text)
+    if guarded is not None:
+        return guarded
     return ask_ai(text)
 
 
@@ -1326,7 +1713,11 @@ class Jarvis:
         self._smart_mic           = None
         self._pressed: set        = set()
         self._last_trigger: float = 0.0
+        self._stop_event          = threading.Event()
+        self._wake_engine: WakeWordEngine | None = None
+        self._wake_thread: threading.Thread | None = None
         self._init_mic()
+        self._init_trigger_mode()
 
     def _init_mic(self):
         global _global_mic
@@ -1338,8 +1729,36 @@ class Jarvis:
             print(f"⚠️  Mic init error: {e}")
             print("   Grant mic access: System Settings → Privacy → Microphone")
 
+    def _init_trigger_mode(self):
+        if TRIGGER_MODE in {"wake", "hybrid"} and self._smart_mic:
+            stt_phrase_engine = STTPhraseWakeWordEngine(self._smart_mic)
+            if WAKEWORD_BACKEND == "openwakeword":
+                self._wake_engine = OpenWakeWordEngine(fallback=stt_phrase_engine)
+            else:
+                self._wake_engine = stt_phrase_engine
+            self._wake_thread = threading.Thread(target=self._wake_loop, daemon=True)
+            self._wake_thread.start()
+            print(f"✅ Wake-word mode active ({WAKEWORD_BACKEND})")
+
+    def _wake_loop(self):
+        if not self._wake_engine:
+            return
+        while not self._stop_event.is_set():
+            if self._busy.locked():
+                time.sleep(0.1)
+                continue
+            try:
+                hit = self._wake_engine.wait_for_wake()
+                if hit:
+                    self.activate()
+            except Exception as exc:
+                print(f"⚠️  Wake-word loop error: {exc}")
+                time.sleep(0.2)
+
     # ── Hotkey (pynput Listener — avoids Python 3.14 GlobalHotKeys crash) ──
     def _on_press(self, key):
+        if TRIGGER_MODE not in {"hotkey", "hybrid"}:
+            return
         self._pressed.add(key)
         has_cmd   = any(k in self._pressed for k in
                         (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r))
@@ -1365,6 +1784,7 @@ class Jarvis:
 
         def _run():
             try:
+                t0 = time.perf_counter()
                 stop_speaking()
                 _play_listen_cue()
                 time.sleep(0.05)
@@ -1372,15 +1792,25 @@ class Jarvis:
                     speak("Microphone unavailable.")
                     return
                 text = self._smart_mic.listen()
+                capture = getattr(self._smart_mic, "last_capture_info", {})
+                if capture:
+                    _latency_metric("cue_to_speech_start", int(capture.get("cue_to_speech_start_ms", 0)))
+                    _latency_metric("speech_end_to_transcript", int(capture.get("speech_end_to_transcript_ms", 0)))
                 if text:
+                    t_transcript = time.perf_counter()
                     response = route(text)
+                    _latency_metric("transcript_to_response", int((time.perf_counter() - t_transcript) * 1000))
                     if response:
                         speak(response)
+                _latency_metric("roundtrip_total", int((time.perf_counter() - t0) * 1000))
             finally:
                 self._busy.release()
                 print("🔇 Ready.\n")
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def shutdown(self):
+        self._stop_event.set()
 
 
 # ─────────────────────────────────────────────
@@ -1395,6 +1825,7 @@ def main():
     print("=" * 52)
     print(f"  Model  : {MODEL} (Ollama)")
     print("  Shell  : ENABLED (typed safe actions only)")
+    print(f"  Trigger: {TRIGGER_MODE}")
     print("  Hotkey : Command + Shift + J")
     print("  Quit   : Ctrl + C")
     print("=" * 52)
@@ -1403,29 +1834,39 @@ def main():
 
     jarvis = Jarvis()
 
-    try:
-        # Use Listener directly — GlobalHotKeys has a broken _on_press
-        # signature on Python 3.14 / newer pynput builds.
-        listener = keyboard.Listener(
-            on_press=jarvis._on_press,
-            on_release=jarvis._on_release
-        )
-        listener.start()
-        print("✅ Hotkey registered: Command + Shift + J")
-        print("   Press it and speak any command or question.")
-        print("   (If nothing happens, add Terminal to Accessibility in System Settings)\n")
+    if TRIGGER_MODE in {"hotkey", "hybrid"}:
+        try:
+            # Use Listener directly — GlobalHotKeys has a broken _on_press
+            # signature on Python 3.14 / newer pynput builds.
+            listener = keyboard.Listener(
+                on_press=jarvis._on_press,
+                on_release=jarvis._on_release
+            )
+            listener.start()
+            print("✅ Hotkey registered: Command + Shift + J")
+            print("   Press it and speak any command or question.")
+            print("   (If nothing happens, add Terminal to Accessibility in System Settings)\n")
+        except Exception as e:
+            print(f"❌ Hotkey registration failed: {e}")
+            print("   Fix: System Settings → Privacy & Security → Accessibility")
+            print("        Add Terminal and re-run.")
+            if TRIGGER_MODE == "hotkey":
+                sys.exit(1)
+    if TRIGGER_MODE in {"wake", "hybrid"}:
+        print("✅ Wake-word listening is active.")
+    if TRIGGER_MODE == "hotkey":
         speak("Jarvis online. Press Command Shift J and speak.")
-    except Exception as e:
-        print(f"❌ Hotkey registration failed: {e}")
-        print("   Fix: System Settings → Privacy & Security → Accessibility")
-        print("        Add Terminal and re-run.")
-        sys.exit(1)
+    elif TRIGGER_MODE == "wake":
+        speak("Jarvis online. Say hey Jarvis to start.")
+    else:
+        speak("Jarvis online. Say hey Jarvis, or press Command Shift J.")
 
     try:
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\n🛑 Jarvis shutting down.")
+        jarvis.shutdown()
         speak("Going offline.")
         sys.exit(0)
 
