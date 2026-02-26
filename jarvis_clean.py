@@ -70,6 +70,7 @@ APPLE_STT_SILENCE_END_MS = int(os.getenv("JARVIS_APPLE_STT_SILENCE_END_MS", "420
 APPLE_STT_MIN_SPEECH_MS = int(os.getenv("JARVIS_APPLE_STT_MIN_SPEECH_MS", "170"))
 APPLE_STT_ENERGY_FLOOR = float(os.getenv("JARVIS_APPLE_STT_ENERGY_FLOOR", "0.010"))
 APPLE_STT_ENERGY_MULTIPLIER = float(os.getenv("JARVIS_APPLE_STT_ENERGY_MULTIPLIER", "2.0"))
+APPLE_STT_BUNDLE_ID = os.getenv("JARVIS_APPLE_STT_BUNDLE_ID", "com.jarvis.speechhelper").strip()
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -262,11 +263,40 @@ class SmartMic:
             print("⚠️  Apple STT source script is missing. Falling back to another STT backend.")
             return None
 
-        cache_dir = Path(HOME) / ".jarvis_cache" / "bin"
-        binary = cache_dir / "apple_stt_once"
+        # TCC on newer macOS requires usage descriptions in an Info.plist.
+        # Build as an app bundle executable to avoid privacy-violation aborts.
+        app_contents = Path(HOME) / ".jarvis_cache" / "apps" / "JarvisSpeechHelper.app" / "Contents"
+        macos_dir = app_contents / "MacOS"
+        resources_dir = app_contents / "Resources"
+        plist_path = app_contents / "Info.plist"
+        binary = macos_dir / "apple_stt_once"
+
+        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>apple_stt_once</string>
+  <key>CFBundleIdentifier</key><string>{APPLE_STT_BUNDLE_ID}</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>JarvisSpeechHelper</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Jarvis uses speech recognition to transcribe your voice commands.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Jarvis uses your microphone to listen for voice commands.</string>
+</dict>
+</plist>
+"""
+
         needs_build = (not binary.exists()) or (src.stat().st_mtime > binary.stat().st_mtime)
+        needs_plist = (not plist_path.exists()) or (plist_path.read_text(encoding="utf-8", errors="ignore") != plist_content)
         if needs_build:
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            macos_dir.mkdir(parents=True, exist_ok=True)
+            resources_dir.mkdir(parents=True, exist_ok=True)
             compile_cmd = [
                 "xcrun",
                 "swiftc",
@@ -283,7 +313,26 @@ class SmartMic:
             if build.returncode != 0:
                 print(f"⚠️  Apple STT build failed: {(build.stderr or build.stdout).strip()[:260]}")
                 return None
+        if needs_plist:
+            plist_path.write_text(plist_content, encoding="utf-8")
+        # ad-hoc signing keeps bundle runnable and more predictable for TCC.
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app_contents.parent)], capture_output=True, text=True)
         return str(binary)
+
+    def _apple_stt_privacy_guidance(self):
+        if self._apple_native_enabled:
+            self._apple_native_enabled = False
+            self._stt_mode = "google"
+            self._stop_apple_stt_daemon()
+        print("⚠️  Apple STT was blocked by macOS privacy (TCC).")
+        print("⚠️  Falling back to Google STT for now.")
+        print("   Run these commands, then start Jarvis again to re-prompt permissions:")
+        print(f"   tccutil reset SpeechRecognition {APPLE_STT_BUNDLE_ID}")
+        print(f"   tccutil reset Microphone {APPLE_STT_BUNDLE_ID}")
+        print("   tccutil reset SpeechRecognition com.apple.Terminal")
+        print("   tccutil reset Microphone com.apple.Terminal")
+        print("   open 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition'")
+        print("   open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'")
 
     def _init_apple_native_backend(self) -> bool:
         binary = self._ensure_apple_stt_binary()
@@ -292,12 +341,60 @@ class SmartMic:
         self._apple_stt_binary = binary
         self._apple_native_enabled = True
         self._stt_mode = "apple_native"
+
+        smoke_cmd = [
+            self._apple_stt_binary,
+            "--max-seconds",
+            "1",
+            "--startup-timeout",
+            "1",
+            "--language",
+            APPLE_STT_LANGUAGE,
+            "--silence-end-ms",
+            str(APPLE_STT_SILENCE_END_MS),
+            "--min-speech-ms",
+            str(APPLE_STT_MIN_SPEECH_MS),
+            "--energy-floor",
+            str(APPLE_STT_ENERGY_FLOOR),
+            "--energy-multiplier",
+            str(APPLE_STT_ENERGY_MULTIPLIER),
+        ]
+        try:
+            smoke = subprocess.run(smoke_cmd, capture_output=True, text=True, timeout=6)
+        except Exception as exc:
+            print(f"⚠️  Apple STT smoke test failed: {exc}. Falling back to Google STT.")
+            self._apple_native_enabled = False
+            self._stt_mode = "google"
+            return False
+
+        if smoke.returncode == 134:
+            self._apple_stt_privacy_guidance()
+            return False
+        if smoke.returncode != 0:
+            print("⚠️  Apple STT self-test failed. Falling back to Google STT.")
+            self._apple_native_enabled = False
+            self._stt_mode = "google"
+            return False
+
+        payload = (smoke.stdout or "").strip()
+        if payload:
+            try:
+                parsed = json.loads(payload.splitlines()[-1])
+                err = str(parsed.get("error", "")).strip().lower() if isinstance(parsed, dict) else ""
+                if "not authorized" in err or "permission" in err:
+                    self._apple_stt_privacy_guidance()
+                    return False
+            except Exception:
+                pass
+
         self._start_apple_stt_daemon()
         if self._apple_daemon_proc and self._apple_daemon_proc.poll() is None:
             print("🧠 STT backend: apple_native (on-device, daemon)")
-        else:
-            print("🧠 STT backend: apple_native (on-device)")
-        return True
+            return True
+        print("⚠️  Apple STT daemon unavailable. Falling back to Google STT.")
+        self._apple_native_enabled = False
+        self._stt_mode = "google"
+        return False
 
     def _start_apple_stt_daemon(self):
         if not self._apple_native_enabled or not self._apple_stt_binary:
@@ -340,8 +437,7 @@ class SmartMic:
             return
         try:
             if proc.stdin:
-                proc.stdin.write("quit\n")
-                proc.stdin.flush()
+                proc.stdin.close()
         except Exception:
             pass
         try:
@@ -453,7 +549,13 @@ class SmartMic:
         with self._apple_daemon_lock:
             self._start_apple_stt_daemon()
             proc = self._apple_daemon_proc
-            if not proc or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
+            if not proc:
+                return None
+            if proc.poll() is not None:
+                if proc.returncode == 134:
+                    self._apple_stt_privacy_guidance()
+                return None
+            if proc.stdin is None or proc.stdout is None:
                 return None
 
             request = {
@@ -480,12 +582,17 @@ class SmartMic:
                 ready = []
             elapsed_ms = int((time.time() - started) * 1000)
             if not ready:
+                if proc.poll() == 134:
+                    self._apple_stt_privacy_guidance()
+                    return "", {"speech_end_to_transcript_ms": elapsed_ms}
                 print("⚠️  Apple STT daemon timed out. Restarting daemon.")
                 self._stop_apple_stt_daemon()
                 return "", {"speech_end_to_transcript_ms": elapsed_ms}
 
             line = proc.stdout.readline().strip()
             if not line:
+                if proc.poll() == 134:
+                    self._apple_stt_privacy_guidance()
                 return "", {"speech_end_to_transcript_ms": elapsed_ms}
             return self._parse_apple_stt_payload(line, elapsed_ms)
 
@@ -525,6 +632,8 @@ class SmartMic:
             err = (result.stderr or result.stdout).strip()
             if err:
                 print(f"⚠️  Apple STT error: {err[:220]}")
+            if result.returncode == 134:
+                self._apple_stt_privacy_guidance()
             return "", {"speech_end_to_transcript_ms": elapsed_ms}
 
         payload = (result.stdout or "").strip()
