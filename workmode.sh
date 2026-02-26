@@ -55,6 +55,16 @@ else
   echo "ℹ️ Optional local STT install skipped (set JARVIS_INSTALL_LOCAL_STT=1 to enable)."
 fi
 
+INSTALL_WAKEWORD="${JARVIS_INSTALL_WAKEWORD:-0}"
+if [[ "$INSTALL_WAKEWORD" == "1" ]]; then
+  echo "📦 Installing optional wake-word package (openwakeword)..."
+  if "$PYTHON" -m pip install --quiet openwakeword; then
+    echo "✅ Wake-word package installed."
+  else
+    echo "⚠️  Wake-word package install failed. Falling back to stt_phrase backend."
+  fi
+fi
+
 # Patch webrtcvad wrapper for Python 3.14+ where pkg_resources can be unavailable.
 WRTC="$($PYTHON -c 'import site, pathlib; print(pathlib.Path(site.getsitepackages()[0]) / "webrtcvad.py")' 2>/dev/null || true)"
 if [[ -n "${WRTC:-}" ]] && [[ -f "$WRTC" ]] && grep -q "pkg_resources" "$WRTC"; then
