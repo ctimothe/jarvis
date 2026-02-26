@@ -40,11 +40,6 @@ try:
 except Exception:
     np = None
 
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    WhisperModel = None
-
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -52,7 +47,7 @@ OLLAMA_URL        = "http://localhost:11434"
 MODEL             = "llama3.1:8b"
 HOME              = os.path.expanduser("~")
 LISTEN_CUE_MODE   = os.getenv("JARVIS_LISTEN_CUE", "beep").strip().lower()
-STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "auto").strip().lower()  # auto|local|google
+STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "google").strip().lower()  # auto|local|google
 LOCAL_STT_MODEL   = os.getenv("JARVIS_LOCAL_STT_MODEL", "tiny.en").strip()
 LOCAL_STT_COMPUTE = os.getenv("JARVIS_LOCAL_STT_COMPUTE", "int8").strip()
 
@@ -206,12 +201,20 @@ class SmartMic:
         if not wants_local:
             print("🧠 STT backend: google")
             return
-        if WhisperModel is None or np is None:
+        if np is None:
             if STT_BACKEND == "local":
-                print("⚠️  Local STT requested but dependencies are missing. Falling back to Google STT.")
+                print("⚠️  Local STT requested but numpy is missing. Falling back to Google STT.")
+            return
+        whisper_model_cls = None
+        try:
+            from faster_whisper import WhisperModel as _WhisperModel
+            whisper_model_cls = _WhisperModel
+        except Exception as exc:
+            if STT_BACKEND == "local":
+                print(f"⚠️  Local STT import failed: {exc}. Falling back to Google STT.")
             return
         try:
-            self._local_model = WhisperModel(LOCAL_STT_MODEL, compute_type=LOCAL_STT_COMPUTE)
+            self._local_model = whisper_model_cls(LOCAL_STT_MODEL, compute_type=LOCAL_STT_COMPUTE)
             self._local_enabled = True
             print(f"🧠 STT backend: local ({LOCAL_STT_MODEL}, {LOCAL_STT_COMPUTE})")
         except Exception as exc:
