@@ -358,3 +358,31 @@ def test_canonical_queries_hit_deterministic_layer(jarvis, monkeypatch, query):
     monkeypatch.setattr(jarvis, "handle_shell", lambda _text: "ok")
     response = jarvis.route(query)
     assert response == "ok"
+
+
+def test_classify_rules_mode_skips_llm(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "CLASSIFIER_MODE", "rules")
+    monkeypatch.setattr(jarvis, "_ollama_alive", lambda: True)
+    monkeypatch.setattr(jarvis, "_chat", lambda **_kwargs: "MUSIC")
+
+    assert jarvis._classify("this is ambiguous text") == "QUESTION"
+
+
+def test_route_quick_truth_response(jarvis):
+    response = jarvis.route("how are you jarvis")
+    assert response == "Ready and listening."
+
+
+def test_stt_wakeword_phrase_is_strict(jarvis):
+    class _FakeMic:
+        def __init__(self, heard: str):
+            self._heard = heard
+
+        def listen(self, **_kwargs):
+            return self._heard
+
+    engine = jarvis.STTPhraseWakeWordEngine(_FakeMic("jarvis online say hey jarvis"))
+    assert engine.wait_for_wake() is False
+
+    engine_ok = jarvis.STTPhraseWakeWordEngine(_FakeMic("hey jarvis"))
+    assert engine_ok.wait_for_wake() is True
