@@ -135,7 +135,9 @@ def test_build_battery_request(jarvis):
         ("what is my volume level", "ACTION_VOLUME_STATUS"),
         ("what song is playing", "ACTION_NOW_PLAYING"),
         ("what's currently being played", "ACTION_NOW_PLAYING"),
+        ("pintinid song", "ACTION_NOW_PLAYING"),
         ("am i on wifi", "ACTION_WIFI_STATUS"),
+        ("am i connected to the internet right now", "ACTION_WIFI_STATUS"),
         ("what time is it", "ACTION_TIME_STATUS"),
         ("what app is active", "ACTION_ACTIVE_APP"),
         ("what is the active at this currently running", "ACTION_ACTIVE_APP"),
@@ -244,6 +246,7 @@ def test_classify_battery_as_shell(jarvis):
 def test_classify_new_status_queries_as_shell(jarvis):
     assert jarvis._classify("what song is currently playing") == "SHELL"
     assert jarvis._classify("what's currently being played") == "SHELL"
+    assert jarvis._classify("am i connected to the internet right now") == "SHELL"
     assert jarvis._classify("what app is active") == "SHELL"
     assert jarvis._classify("which app is running right now") == "SHELL"
     assert jarvis._classify("translate hello to spanish") == "SHELL"
