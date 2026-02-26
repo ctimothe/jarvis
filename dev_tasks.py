@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json
 import datetime
-from pathlib import Path
-from typing import Dict
+import json
+import subprocess
+import sys
+from typing import Any, Dict
 
-ROOT = Path('/Users/ctimothe/Desktop/code/jarvis_v2').resolve()
-STATE = ROOT / 'state.json'
-LOG = ROOT / 'run_logs' / 'dev_tasks.log'
+
+def utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
 
 class Task:
     def __init__(self, name:str):
@@ -24,20 +26,32 @@ class DependencyAudit(Task):
         Returns a structured report with a list of outdated packages.
         """
         try:
-            # Prefer JSON output if available for easier parsing
-            cmd = ["python", "-m", "pip", "list", "--outdated", "--format=json"]
-            import subprocess
+            # Use the active interpreter so venv invocation is always correct.
+            cmd = [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"]
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if proc.returncode == 0:
+            if proc.returncode == 0 and proc.stdout.strip():
                 try:
-                    outdated = __import__('json').loads(proc.stdout) if proc.stdout.strip() else []
+                    outdated: list[dict[str, Any]] = json.loads(proc.stdout)
                 except Exception:
                     outdated = []
-            else:
-                cmd2 = ["python", "-m", "pip", "list", "--outdated"]
-                proc2 = subprocess.run(cmd2, capture_output=True, text=True, check=False)
-                outdated = proc2.stdout.splitlines() if proc2.returncode == 0 else []
-            return {"status": "ok", "outdated_packages": outdated}
+                return {"status": "ok", "interpreter": sys.executable, "outdated_packages": outdated}
+
+            # Fallback to non-JSON output when JSON output is not available.
+            cmd_fallback = [sys.executable, "-m", "pip", "list", "--outdated"]
+            proc_fallback = subprocess.run(cmd_fallback, capture_output=True, text=True, check=False)
+            if proc_fallback.returncode == 0:
+                lines = [line for line in proc_fallback.stdout.splitlines() if line.strip()]
+                return {
+                    "status": "ok",
+                    "interpreter": sys.executable,
+                    "outdated_packages_text": lines,
+                }
+
+            return {
+                "status": "error",
+                "interpreter": sys.executable,
+                "error": proc.stderr.strip() or proc_fallback.stderr.strip() or "pip audit failed",
+            }
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -45,7 +59,7 @@ class MoodCapture(Task):
     def __init__(self): super().__init__('mood_capture')
     def run(self, state:Dict[str,object]) -> Dict[str,object]:
         mood = state.get('mood', 'neutral')
-        entry = {'timestamp': datetime.datetime.utcnow().isoformat(), 'mood': mood}
+        entry = {'timestamp': utc_now_iso(), 'mood': mood}
         hist = state.get('mood_history', [])
         hist.append(entry)
         state['mood_history'] = hist
@@ -59,7 +73,7 @@ class SelfImprovementBacklog(Task):
         item = {
             'id': f'auto-{len(backlog)+1}',
             'desc': 'Propose a non-destructive improvement (docs, comments, README, small refactor)',
-            'created_at': datetime.datetime.utcnow().isoformat(),
+            'created_at': utc_now_iso(),
             'status': 'backlog'
         }
         backlog.append(item)

@@ -8,15 +8,11 @@ Jarvis v2 - Bounded autonomous task runner scaffold
 """
 
 from __future__ import annotations
-import logging
-import json
 import datetime
+import json
+import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
-import subprocess
-import shutil
-import re
-import os # For path joining and existence checks
+from typing import Any, Dict, List
 
 ROOT = Path("/Users/ctimothe/Desktop/code/jarvis_v2").resolve()
 LOG_DIR = ROOT / "run_logs"
@@ -30,10 +26,14 @@ logging.basicConfig(
 )
 
 STATE_FILE = ROOT / "state.json"
+MAX_STEPS_PER_RUN = 10
+MAX_TASK_RETRIES = 1
+MAX_FAILURES_PER_RUN = 3
 
-# Helper to find Python executable
-def get_python_executable():
-    return shutil.which("python") or shutil.which("python3") or "python" # Fallback
+
+def utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
 
 # --- Base Task Structure ---
 class Task:
@@ -81,7 +81,7 @@ class PruneEnvTask(Task):
 class FetchAPITask(Task):
     def __init__(self): super().__init__("fetch_api")
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        summary = {"note": "Simulated API fetch - no network in this sandbox", "fetched_at": datetime.datetime.utcnow().isoformat()}
+        summary = {"note": "Simulated API fetch - no network in this sandbox", "fetched_at": utc_now_iso()}
         return {"status": "ok", "summary": summary}
 
 # --- Task List ---
@@ -98,30 +98,30 @@ else:
 # ----------------------------
 # State management
 # ----------------------------
+def default_state() -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "pos": 0,
+        "history": [],
+        "mood": "neutral",
+        "mood_history": [],
+        "improvement_backlog": [],
+        "last_errors": [],
+    }
+
+
 def load_state() -> Dict[str, Any]:
     if STATE_FILE.exists():
         try:
             with STATE_FILE.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Ensure essential keys exist, add if missing, and provide defaults
-                data['version'] = data.get('version', 1)
-                data['pos'] = data.get('pos', 0)
-                data['history'] = data.get('history', [])
-                data['mood'] = data.get('mood', 'neutral') # Initialize or preserve mood
-                data['mood_history'] = data.get('mood_history', [])
-                data['improvement_backlog'] = data.get('improvement_backlog', [])
+                defaults = default_state()
+                for key, value in defaults.items():
+                    data[key] = data.get(key, value)
                 return data
         except Exception as e:
             logging.warning(f"Failed to load state from {STATE_FILE}: {e}. Initializing fresh state.")
-    # Initialize state with default values if file not found or corrupted
-    return {
-        "version": 1,
-        "pos": 0,
-        "history": [],
-        "mood": "neutral", # Default mood
-        "mood_history": [],
-        "improvement_backlog": []
-    }
+    return default_state()
 
 def save_state(state: Dict[str, Any]) -> None:
     try:
@@ -138,11 +138,9 @@ def main():
     state = load_state()
     pos = state.get("pos", 0)
 
-    MAX_STEPS_PER_RUN = 10 # Number of tasks to execute in a single pass
-
     steps_taken_in_this_run = 0
+    failures_in_this_run = 0
     try:
-        # Ensure pos is within bounds of available tasks, or reset to 0 if it's past the end
         if pos >= len(TASKS) and len(TASKS) > 0:
             logging.warning(f"Current position {pos} is beyond task list length {len(TASKS)}. Resetting to 0 for new tasks.")
             pos = 0
@@ -151,33 +149,70 @@ def main():
         while pos < len(TASKS) and steps_taken_in_this_run < MAX_STEPS_PER_RUN:
             task_to_run = TASKS[pos]
             logging.info(f"Starting task {pos+1}/{len(TASKS)}: {task_to_run.describe()}")
-            
-            result = task_to_run.run(state) 
+
+            result: Dict[str, Any] = {"status": "error", "error": "task did not run"}
+            attempts = 0
+            for attempt in range(MAX_TASK_RETRIES + 1):
+                attempts = attempt + 1
+                try:
+                    result = task_to_run.run(state)
+                except Exception as exc:
+                    result = {"status": "error", "error": str(exc)}
+                if result.get("status") == "ok":
+                    break
+                logging.warning(
+                    "Task '%s' attempt %d/%d failed: %s",
+                    task_to_run.name,
+                    attempts,
+                    MAX_TASK_RETRIES + 1,
+                    result.get("error", result.get("status", "unknown failure")),
+                )
 
             entry = {
-                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "timestamp": utc_now_iso(),
                 "task": task_to_run.name,
                 "result": result,
+                "attempts": attempts,
             }
             state["history"].append(entry)
 
             if result.get("status") != "ok":
-                logging.warning(f"Task '{task_to_run.name}' reported non-ok status: {result.get('error', result.get('status'))}. Breaking loop.")
-                break # Stop on first non-ok task
+                failures_in_this_run += 1
+                last_errors = state.setdefault("last_errors", [])
+                last_errors.append(
+                    {
+                        "timestamp": entry["timestamp"],
+                        "task": task_to_run.name,
+                        "error": result.get("error", result.get("status", "unknown failure")),
+                    }
+                )
+                if len(last_errors) > 25:
+                    del last_errors[:-25]
 
-            pos += 1 # Move to next task index
-            state["pos"] = pos # Update resume position
-            save_state(state) # Save state after each successful task
-            steps_taken_in_this_run += 1 # Increment counter for current run
+            pos += 1
+            state["pos"] = pos
+            save_state(state)
+            steps_taken_in_this_run += 1
 
-        logging.info("Run loop finished this pass. %d tasks executed.", steps_taken_in_this_run)
+            if failures_in_this_run >= MAX_FAILURES_PER_RUN:
+                logging.error(
+                    "Stopping this pass after %d task failures to avoid noisy loops.",
+                    failures_in_this_run,
+                )
+                break
+
+        logging.info(
+            "Run loop finished this pass. tasks_executed=%d failures=%d",
+            steps_taken_in_this_run,
+            failures_in_this_run,
+        )
     except KeyboardInterrupt:
         logging.info("Interrupted by user. Saving state and exiting gracefully.")
-        save_state(state) 
+        save_state(state)
         return
     except Exception as e:
         logging.exception(f"Unexpected error occurred during task execution: {e}")
-        save_state(state) 
+        save_state(state)
 
     logging.info("Jarvis v2 runner finished this pass. Next run will resume from task position %d.", pos)
 
