@@ -4,10 +4,12 @@
 - Workspace status: `bash status.sh`
 - Python syntax: `.venv/bin/python3 -c "import ast,pathlib; ast.parse(pathlib.Path('jarvis_clean.py').read_text()); print('Syntax OK')"`
 - Shell script syntax: `bash -n workmode.sh status.sh stopwork.sh`
+- Unit tests: `.venv/bin/python3 -m pytest -q`
 
 ## Runtime controls
 - Start: `bash workmode.sh`
 - Stop: `bash stopwork.sh`
+- Reset local task-runner state/logs: `bash scripts/reset_state.sh`
 
 ## Audit and metrics
 - Audit trail: `~/.jarvis_audit/audit.jsonl`

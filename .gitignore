@@ -12,6 +12,8 @@ venv/
 
 # Logs / runtime
 *.log
+run_logs/
+state.json
 
 # Tooling caches
 .pytest_cache/
