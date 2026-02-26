@@ -29,6 +29,7 @@
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
   - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
   - `export JARVIS_SHOW_PARTIALS=1` and `export JARVIS_LOCAL_STT_PARTIAL_MAX_UPDATES=10` to limit partial spam
+  - `export JARVIS_LOCAL_STT_BEAM_SIZE=3`, `export JARVIS_LOCAL_STT_BEST_OF=3`, `export JARVIS_LOCAL_STT_CONDITION_ON_PREVIOUS=0`
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
   - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`)
   - `export JARVIS_WAKEWORD_BACKEND=openwakeword|stt_phrase` (default `openwakeword`)

@@ -51,6 +51,7 @@ Latency tuning:
 - Wake phrase strictness: `export JARVIS_WAKEWORD_MAX_WORDS=4`.
 - VAD profile: `export JARVIS_VAD_PROFILE=fast|balanced|robust`.
 - Partial transcript controls: `export JARVIS_SHOW_PARTIALS=1` and `export JARVIS_LOCAL_STT_PARTIAL_MAX_UPDATES=10`.
+- Local STT quality tuning: `export JARVIS_LOCAL_STT_BEAM_SIZE=3`, `export JARVIS_LOCAL_STT_BEST_OF=3`, `export JARVIS_LOCAL_STT_CONDITION_ON_PREVIOUS=0`.
 - Classifier mode: `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`).
 - Translation target default: `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`.
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.
