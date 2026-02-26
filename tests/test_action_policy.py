@@ -238,3 +238,8 @@ def test_extract_battery_summary(jarvis):
     assert "81 percent" in summary
     assert "maximum capacity 92 percent" in summary
     assert "cycle count 120" in summary
+
+
+def test_route_wake_up_short_response(jarvis):
+    response = jarvis.route("wake up")
+    assert response == "I'm here and ready."

@@ -1285,6 +1285,8 @@ def _classify(text: str) -> str:
 def route(text: str) -> str:
     if not text.strip():
         return "I didn't catch that."
+    if re.search(r"\b(wake up|are you there|hello jarvis|hey jarvis)\b", text.lower()):
+        return "I'm here and ready."
     pending_control = _handle_pending_mission_control(text)
     if pending_control is not None:
         return pending_control
