@@ -17,6 +17,7 @@
   - Get last summary: `mission report`
 - Low-latency/STT tuning:
   - `export JARVIS_LISTEN_CUE=beep` (default), `speech`, or `none`
+  - `export JARVIS_SHOW_TURN_TIMERS=1` to print stage-by-stage turn timings
   - `export JARVIS_STT_BACKEND=apple_native` (default on macOS)
   - On macOS 26+, Apple helper auto-falls back to local Whisper unless `JARVIS_FORCE_APPLE_HELPER=1`
   - `export JARVIS_STT_BACKEND=google` for cloud fallback
@@ -27,6 +28,7 @@
   - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
   - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
+  - `export JARVIS_SHOW_PARTIALS=1` and `export JARVIS_LOCAL_STT_PARTIAL_MAX_UPDATES=10` to limit partial spam
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
   - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`)
   - `export JARVIS_WAKEWORD_BACKEND=openwakeword|stt_phrase` (default `openwakeword`)

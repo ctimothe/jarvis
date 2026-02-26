@@ -34,6 +34,7 @@ Translation examples:
 Latency tuning:
 - Default listen cue is a short beep (faster than spoken "Listening").
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
+- Per-turn timer summary in console: `export JARVIS_SHOW_TURN_TIMERS=1` (default on).
 - STT backend defaults to `apple_native` on macOS for speed: `export JARVIS_STT_BACKEND=apple_native|google|local|auto`.
 - Apple Speech language: `export JARVIS_APPLE_STT_LANGUAGE=en-US`.
 - On macOS 26+, Apple helper is auto-disabled by default due TCC crash behavior; Jarvis falls back to local Whisper. Override only if you want to test: `export JARVIS_FORCE_APPLE_HELPER=1`.
@@ -49,6 +50,7 @@ Latency tuning:
 - Wake guard against false triggers: `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800`.
 - Wake phrase strictness: `export JARVIS_WAKEWORD_MAX_WORDS=4`.
 - VAD profile: `export JARVIS_VAD_PROFILE=fast|balanced|robust`.
+- Partial transcript controls: `export JARVIS_SHOW_PARTIALS=1` and `export JARVIS_LOCAL_STT_PARTIAL_MAX_UPDATES=10`.
 - Classifier mode: `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`).
 - Translation target default: `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`.
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.
