@@ -23,3 +23,22 @@ if [[ -x "$SCRIPT_DIR/.venv/bin/python3" ]]; then
 else
 	echo "ℹ️ Virtualenv: missing (run bash workmode.sh)"
 fi
+
+echo
+
+if [[ -x "$SCRIPT_DIR/.venv/bin/python3" ]]; then
+  echo "Jarvis doctor:"
+  if "$SCRIPT_DIR/.venv/bin/python3" - <<'PY' >/dev/null 2>&1; then
+import importlib
+mods = ("speech_recognition", "pyaudio", "webrtcvad", "requests", "pynput")
+missing = [m for m in mods if importlib.util.find_spec(m) is None]
+raise SystemExit(1 if missing else 0)
+PY
+  then
+    echo "  ✅ Core Python deps: present"
+  else
+    echo "  ⚠️ Core Python deps: missing (re-run bash workmode.sh)"
+  fi
+  echo "  ℹ️ If hotkey does nothing, add Terminal to Accessibility in System Settings."
+  echo "  ℹ️ If mic fails, check Microphone access for Terminal in Privacy settings."
+fi

@@ -142,6 +142,9 @@ def test_build_battery_request(jarvis):
         ("what app is active", "ACTION_ACTIVE_APP"),
         ("what is the active at this currently running", "ACTION_ACTIVE_APP"),
         ('translate "hello" to spanish', "ACTION_TRANSLATE_TEXT"),
+        ("set volume to 42", "ACTION_SET_VOLUME_LEVEL"),
+        ("mute my volume", "ACTION_TOGGLE_MUTE"),
+        ("unmute my volume", "ACTION_TOGGLE_MUTE"),
     ],
 )
 def test_build_new_status_requests(jarvis, query, expected_action):
@@ -197,6 +200,43 @@ def test_policy_requires_approval_for_delete(jarvis):
 
     assert decision.allowed is True
     assert decision.requires_approval is True
+
+
+def test_git_actions_enforce_home_policy(jarvis):
+    outside = "/tmp/repo"
+    inside = "/Users/tester/code"
+
+    req_status_out = jarvis.ActionRequest(
+        action=jarvis.ACTION_GIT_STATUS,
+        args={"repo": outside},
+        principal="tester",
+        reason="test",
+    )
+    assert jarvis._policy_check(req_status_out).allowed is False
+
+    req_status_in = jarvis.ActionRequest(
+        action=jarvis.ACTION_GIT_STATUS,
+        args={"repo": inside},
+        principal="tester",
+        reason="test",
+    )
+    assert jarvis._policy_check(req_status_in).allowed is True
+
+    req_diff_out = jarvis.ActionRequest(
+        action=jarvis.ACTION_GIT_DIFF_STAT,
+        args={"repo": outside},
+        principal="tester",
+        reason="test",
+    )
+    assert jarvis._policy_check(req_diff_out).allowed is False
+
+    req_search_out = jarvis.ActionRequest(
+        action=jarvis.ACTION_PROJECT_SEARCH,
+        args={"path": outside, "pattern": "foo"},
+        principal="tester",
+        reason="test",
+    )
+    assert jarvis._policy_check(req_search_out).allowed is False
 
 
 def test_build_mission_plan(jarvis):
@@ -359,6 +399,17 @@ def test_route_wake_up_short_response(jarvis):
         "time now",
         "frontmost app",
         "translate thank you",
+        "set volume to 30",
+        "mute my volume",
+        "unmute my volume",
+        "git diff in ~/code",
+        "git log in ~/code",
+        "git branches in ~/code",
+        "what changed since last commit in ~/code",
+        "search for hello in ~/code",
+        "quit chrome",
+        "focus chrome",
+        "open url https://example.com",
     ],
 )
 def test_canonical_queries_hit_deterministic_layer(jarvis, monkeypatch, query):

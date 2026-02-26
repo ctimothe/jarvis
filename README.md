@@ -5,6 +5,28 @@ Jarvis v2 - bounded autonomous task runner
 - Mission mode for multi-step shell actions with preview + explicit execute/cancel
 - Deterministic local Siri-style status commands (battery, volume, song, wifi, date/time, active app)
 
+## Daily-driver voice commands
+
+- Status:
+  - `is my laptop charging`
+  - `what is my volume level`
+  - `what song is playing`
+  - `am i on wifi`
+  - `what time is it`
+  - `what app is active`
+- Mac controls:
+  - `set volume to 30`
+  - `mute my volume` / `unmute my volume`
+  - `quit chrome` / `focus chrome`
+  - `open url https://example.com`
+- Developer helpers (per‑repo):
+  - `git status in ~/code`
+  - `git diff in ~/code`
+  - `git log in ~/code`
+  - `git branches in ~/code`
+  - `what changed since last commit in ~/code`
+  - `search for hello in ~/code`
+
 Quick commands:
 - Start voice assistant: `bash workmode.sh`
 - Check health: `bash status.sh`

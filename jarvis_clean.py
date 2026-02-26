@@ -20,6 +20,7 @@ import resource
 import shutil
 import select
 import difflib
+import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -902,6 +903,13 @@ KNOWN_APPS = {
 }
 
 
+def _match_known_app(query_lower: str) -> str | None:
+    for key, app in KNOWN_APPS.items():
+        if re.search(rf"\\b{re.escape(key)}\\b", query_lower):
+            return app
+    return None
+
+
 # ─────────────────────────────────────────────
 # COMMAND HANDLERS
 # ─────────────────────────────────────────────
@@ -991,6 +999,11 @@ ACTION_RENAME_PATH = "rename_path"
 ACTION_DELETE_PATH = "delete_path"
 ACTION_DISK_USAGE = "disk_usage"
 ACTION_GIT_STATUS = "git_status"
+ACTION_GIT_DIFF_STAT = "git_diff_stat"
+ACTION_GIT_LOG_RECENT = "git_log_recent"
+ACTION_GIT_BRANCHES = "git_branches"
+ACTION_GIT_RECENT_CHANGES = "git_recent_changes"
+ACTION_PROJECT_SEARCH = "project_search"
 ACTION_BATTERY_STATUS = "battery_status"
 ACTION_VOLUME_STATUS = "volume_status"
 ACTION_NOW_PLAYING = "now_playing"
@@ -998,6 +1011,11 @@ ACTION_WIFI_STATUS = "wifi_status"
 ACTION_TIME_STATUS = "time_status"
 ACTION_ACTIVE_APP = "active_app"
 ACTION_TRANSLATE_TEXT = "translate_text"
+ACTION_SET_VOLUME_LEVEL = "set_volume_level"
+ACTION_TOGGLE_MUTE = "toggle_mute"
+ACTION_QUIT_APP = "quit_app"
+ACTION_FOCUS_APP = "focus_app"
+ACTION_OPEN_URL = "open_url"
 
 SUPPORTED_ACTIONS = {
     ACTION_CREATE_FOLDER,
@@ -1010,6 +1028,11 @@ SUPPORTED_ACTIONS = {
     ACTION_DELETE_PATH,
     ACTION_DISK_USAGE,
     ACTION_GIT_STATUS,
+    ACTION_GIT_DIFF_STAT,
+    ACTION_GIT_LOG_RECENT,
+    ACTION_GIT_BRANCHES,
+    ACTION_GIT_RECENT_CHANGES,
+    ACTION_PROJECT_SEARCH,
     ACTION_BATTERY_STATUS,
     ACTION_VOLUME_STATUS,
     ACTION_NOW_PLAYING,
@@ -1017,6 +1040,11 @@ SUPPORTED_ACTIONS = {
     ACTION_TIME_STATUS,
     ACTION_ACTIVE_APP,
     ACTION_TRANSLATE_TEXT,
+    ACTION_SET_VOLUME_LEVEL,
+    ACTION_TOGGLE_MUTE,
+    ACTION_QUIT_APP,
+    ACTION_FOCUS_APP,
+    ACTION_OPEN_URL,
 }
 
 WRITE_ACTIONS = {
@@ -1481,6 +1509,32 @@ def _build_action_request(query: str) -> ActionRequest | None:
             reason=text,
         )
 
+    vol_set = re.search(r"\bset\s+(?:the\s+)?volume\s+(?:to|at)\s+(\d+)", lower)
+    if vol_set:
+        level = max(0, min(100, int(vol_set.group(1))))
+        return ActionRequest(
+            action=ACTION_SET_VOLUME_LEVEL,
+            args={"level": level},
+            principal=principal,
+            reason=text,
+        )
+
+    if re.search(r"\b(mute (?:my )?(?:volume|sound|audio)|turn (?:the )?sound off)\b", lower):
+        return ActionRequest(
+            action=ACTION_TOGGLE_MUTE,
+            args={"mute": True},
+            principal=principal,
+            reason=text,
+        )
+
+    if re.search(r"\b(unmute (?:my )?(?:volume|sound|audio)|turn (?:the )?sound on)\b", lower):
+        return ActionRequest(
+            action=ACTION_TOGGLE_MUTE,
+            args={"mute": False},
+            principal=principal,
+            reason=text,
+        )
+
     if re.search(r'\b(disk\s+space|storage|disk\s+usage)\b', lower):
         return ActionRequest(action=ACTION_DISK_USAGE, args={}, principal=principal, reason=text)
 
@@ -1515,6 +1569,62 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if match:
         repo = _normalize_path(match.group(1) or os.getcwd())
         return ActionRequest(action=ACTION_GIT_STATUS, args={"repo": repo}, principal=principal, reason=text)
+
+    if re.search(r'\bgit\s+diff\b', lower):
+        repo_match = re.search(r'\bin\s+(.+)$', lower)
+        repo = _normalize_path(repo_match.group(1)) if repo_match else os.getcwd()
+        return ActionRequest(
+            action=ACTION_GIT_DIFF_STAT,
+            args={"repo": repo},
+            principal=principal,
+            reason=text,
+        )
+
+    if re.search(r'\bgit\s+log\b', lower):
+        repo_match = re.search(r'\bin\s+(.+)$', lower)
+        repo = _normalize_path(repo_match.group(1)) if repo_match else os.getcwd()
+        limit_match = re.search(r'\blast\s+(\d+)\b', lower)
+        limit = int(limit_match.group(1)) if limit_match else 5
+        limit = max(1, min(50, limit))
+        return ActionRequest(
+            action=ACTION_GIT_LOG_RECENT,
+            args={"repo": repo, "limit": limit},
+            principal=principal,
+            reason=text,
+        )
+
+    if re.search(r'\bgit\s+branches\b', lower) or re.search(r'\b(list|show)\s+branches\b', lower):
+        repo_match = re.search(r'\bin\s+(.+)$', lower)
+        repo = _normalize_path(repo_match.group(1)) if repo_match else os.getcwd()
+        return ActionRequest(
+            action=ACTION_GIT_BRANCHES,
+            args={"repo": repo},
+            principal=principal,
+            reason=text,
+        )
+
+    recent_changes = re.search(r'\bwhat (?:has )?changed since (?:the )?last commit\b', lower)
+    if recent_changes:
+        repo_match = re.search(r'\bin\s+(.+)$', lower)
+        repo = _normalize_path(repo_match.group(1)) if repo_match else os.getcwd()
+        return ActionRequest(
+            action=ACTION_GIT_RECENT_CHANGES,
+            args={"repo": repo},
+            principal=principal,
+            reason=text,
+        )
+
+    search_match = re.search(r'\bsearch\s+for\s+(.+?)\s+in\s+(.+)$', text, flags=re.IGNORECASE)
+    if search_match:
+        pattern = search_match.group(1).strip().strip("'\"")
+        root = _normalize_path(search_match.group(2))
+        if pattern:
+            return ActionRequest(
+                action=ACTION_PROJECT_SEARCH,
+                args={"pattern": pattern, "path": root},
+                principal=principal,
+                reason=text,
+            )
 
     match = re.search(r'\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory)\s+(?:called\s+)?(.+)$', lower)
     if match:
@@ -1568,6 +1678,37 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if match:
         return ActionRequest(action=ACTION_DELETE_PATH, args={"path": _normalize_path(match.group(1))}, principal=principal, reason=text)
 
+    if re.search(r'\b(quit|close)\b', lower):
+        app = _match_known_app(lower)
+        if app:
+            return ActionRequest(
+                action=ACTION_QUIT_APP,
+                args={"app": app},
+                principal=principal,
+                reason=text,
+            )
+
+    if re.search(r'\b(focus|activate|switch to)\b', lower):
+        app = _match_known_app(lower)
+        if app:
+            return ActionRequest(
+                action=ACTION_FOCUS_APP,
+                args={"app": app},
+                principal=principal,
+                reason=text,
+            )
+
+    url_match = re.search(r'\bopen\s+url\s+(\S+)', text, flags=re.IGNORECASE)
+    if url_match:
+        url = url_match.group(1).strip().strip("'\"")
+        if url.lower().startswith(("http://", "https://")):
+            return ActionRequest(
+                action=ACTION_OPEN_URL,
+                args={"url": url},
+                principal=principal,
+                reason=text,
+            )
+
     return None
 
 
@@ -1599,10 +1740,27 @@ def _describe_action_request(request: ActionRequest) -> str:
         return f"delete {_shorten(args.get('path', ''))}"
     if action == ACTION_DISK_USAGE:
         return "check disk usage"
+    if action == ACTION_GIT_STATUS:
+        return f"git status in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_GIT_DIFF_STAT:
+        return f"git diff stat in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_GIT_LOG_RECENT:
+        count = args.get("limit", 5)
+        return f"git log last {count} in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_GIT_BRANCHES:
+        return f"git branches in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_GIT_RECENT_CHANGES:
+        return f"recent changes since last commit in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_PROJECT_SEARCH:
+        return f"search '{_shorten(args.get('pattern', ''))}' in {_shorten(args.get('path', ''))}"
     if action == ACTION_BATTERY_STATUS:
         return "check battery status and health"
     if action == ACTION_VOLUME_STATUS:
         return "check output volume"
+    if action == ACTION_SET_VOLUME_LEVEL:
+        return f"set volume to {args.get('level', 0)} percent"
+    if action == ACTION_TOGGLE_MUTE:
+        return "mute volume" if args.get("mute", True) else "unmute volume"
     if action == ACTION_NOW_PLAYING:
         return "check current song"
     if action == ACTION_WIFI_STATUS:
@@ -1613,8 +1771,12 @@ def _describe_action_request(request: ActionRequest) -> str:
         return "check active app"
     if action == ACTION_TRANSLATE_TEXT:
         return f"translate text to {args.get('target_lang', TRANSLATION_DEFAULT_TARGET)}"
-    if action == ACTION_GIT_STATUS:
-        return f"git status in {_shorten(args.get('repo', ''))}"
+    if action == ACTION_QUIT_APP:
+        return f"quit app {args.get('app', '')}"
+    if action == ACTION_FOCUS_APP:
+        return f"focus app {args.get('app', '')}"
+    if action == ACTION_OPEN_URL:
+        return f"open url {_shorten(args.get('url', ''))}"
     return action
 
 
@@ -1695,10 +1857,21 @@ def _policy_check(request: ActionRequest, *, consume_rate_limit: bool = True) ->
             if not _is_under_home(path):
                 return PolicyDecision(False, f"write action outside home blocked: {path}")
 
-    if request.action == ACTION_GIT_STATUS:
+    if request.action in {
+        ACTION_GIT_STATUS,
+        ACTION_GIT_DIFF_STAT,
+        ACTION_GIT_LOG_RECENT,
+        ACTION_GIT_BRANCHES,
+        ACTION_GIT_RECENT_CHANGES,
+    }:
         repo = request.args.get("repo", "")
         if not _is_under_home(repo):
-            return PolicyDecision(False, "git status outside home blocked")
+            return PolicyDecision(False, "git command outside home blocked")
+
+    if request.action == ACTION_PROJECT_SEARCH:
+        root = request.args.get("path", "")
+        if not _is_under_home(root):
+            return PolicyDecision(False, "project search outside home blocked")
 
     return PolicyDecision(True, "allowed", request.action in DESTRUCTIVE_ACTIONS)
 
@@ -1794,6 +1967,36 @@ def _run_battery_status_action() -> ActionResult:
         stderr=stderr,
         duration_ms=int((time.time() - started) * 1000),
         command_repr="pmset -g batt && system_profiler SPPowerDataType -detailLevel mini",
+    )
+
+
+def _run_set_volume_level_action(level: int) -> ActionResult:
+    started = time.time()
+    script = f'set volume output volume {level}'
+    result = _run_safe_process(["osascript", "-e", script], timeout=6)
+    summary = f"Output volume set to {level} percent."
+    return ActionResult(
+        ok=result.ok,
+        return_code=result.return_code,
+        stdout=summary if result.ok else "",
+        stderr=result.stderr,
+        duration_ms=int((time.time() - started) * 1000),
+        command_repr=script,
+    )
+
+
+def _run_toggle_mute_action(mute: bool) -> ActionResult:
+    started = time.time()
+    script = f"set volume output muted {'true' if mute else 'false'}"
+    result = _run_safe_process(["osascript", "-e", script], timeout=6)
+    summary = "Output muted." if mute else "Output unmuted."
+    return ActionResult(
+        ok=result.ok,
+        return_code=result.return_code,
+        stdout=summary if result.ok else "",
+        stderr=result.stderr,
+        duration_ms=int((time.time() - started) * 1000),
+        command_repr=script,
     )
 
 
@@ -1940,10 +2143,29 @@ def _execute_action_request(request: ActionRequest) -> ActionResult:
         return _run_safe_process(["osascript", "-e", script])
     if action == ACTION_DISK_USAGE:
         return _run_safe_process(["df", "-h", "/Users"])
+    if action == ACTION_GIT_DIFF_STAT:
+        return _run_safe_process(["git", "-C", args["repo"], "diff", "--stat"])
+    if action == ACTION_GIT_LOG_RECENT:
+        limit = int(args.get("limit", 5))
+        return _run_safe_process(["git", "-C", args["repo"], "log", f"-n{limit}", "--oneline"])
+    if action == ACTION_GIT_BRANCHES:
+        return _run_safe_process(["git", "-C", args["repo"], "branch", "--all", "--color=never"])
+    if action == ACTION_GIT_RECENT_CHANGES:
+        return _run_safe_process(["git", "-C", args["repo"], "diff", "--stat", "HEAD~1..HEAD"])
+    if action == ACTION_PROJECT_SEARCH:
+        # Limit output size via ripgrep options to keep summaries fast.
+        return _run_safe_process(
+            ["rg", "--max-count", "200", "--no-heading", "--color", "never", args["pattern"], args["path"]],
+            timeout=ACTION_TIMEOUT_SECONDS,
+        )
     if action == ACTION_BATTERY_STATUS:
         return _run_battery_status_action()
     if action == ACTION_VOLUME_STATUS:
         return _run_volume_status_action()
+    if action == ACTION_SET_VOLUME_LEVEL:
+        return _run_set_volume_level_action(int(args["level"]))
+    if action == ACTION_TOGGLE_MUTE:
+        return _run_toggle_mute_action(bool(args.get("mute", True)))
     if action == ACTION_NOW_PLAYING:
         return _run_now_playing_action()
     if action == ACTION_WIFI_STATUS:
@@ -1956,6 +2178,14 @@ def _execute_action_request(request: ActionRequest) -> ActionResult:
         return _run_translate_action(args)
     if action == ACTION_GIT_STATUS:
         return _run_safe_process(["git", "-C", args["repo"], "status", "--short"])
+    if action == ACTION_QUIT_APP:
+        script = f'tell application "{args["app"]}" to quit'
+        return _run_safe_process(["osascript", "-e", script])
+    if action == ACTION_FOCUS_APP:
+        script = f'tell application "{args["app"]}" to activate'
+        return _run_safe_process(["osascript", "-e", script])
+    if action == ACTION_OPEN_URL:
+        return _run_safe_process(["open", args["url"]])
 
     return ActionResult(False, -1, "", f"Unsupported action: {action}", 0, action)
 
@@ -2060,6 +2290,7 @@ def _execute_mission_plan(plan: MissionPlan) -> str:
     failure_count = 0
     report_lines: list[str] = []
 
+    total_steps = len(plan.requests)
     for idx, request in enumerate(plan.requests, start=1):
         decision = _policy_check(request)
         _audit("action_requested", request, decision=decision, message=f"mission_id={plan.mission_id};step={idx}")
@@ -2079,6 +2310,11 @@ def _execute_mission_plan(plan: MissionPlan) -> str:
             )
             report_lines.append(f"Step {idx}: cancelled by approval gate")
             continue
+
+        try:
+            speak(f"Running step {idx} of {total_steps}: {_describe_action_request(request)}.")
+        except Exception as exc:
+            print(f"⚠️  TTS error before mission step {idx}: {exc}")
 
         dispatched, result, dispatch_message = _dispatch_action_job(request)
         if not dispatched or not result:
@@ -2240,13 +2476,23 @@ def _classify_by_rules(text: str) -> str | None:
         r'\b(folder|directory|file)\b',
         r'\b(disk\s+space|storage|disk\s+usage)\b',
         r'\bgit\s+status\b',
+        r'\bgit\s+diff\b',
+        r'\bgit\s+log\b',
+        r'\bgit\s+branches\b',
+        r'\bwhat (?:has )?changed since (?:the )?last commit\b',
         r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count|charging|power adapter)\b',
         r'\b(volume level|current volume|sound level|mute status)\b',
+        r'\bset\s+(?:the\s+)?volume\s+(?:to|at)\s+\d+\b',
+        r'\b(mute (?:my )?(?:volume|sound|audio)|unmute (?:my )?(?:volume|sound|audio)|turn (?:the )?sound (?:on|off))\b',
         r'\b(now playing|what song|what.?s.*playing|song.*playing|currently(?:\s+being)?\s+played|currently.*playing|current song|being played)\b',
         r'\b(wi[- ]?fi|ssid|network name|network am i on|what network|internet(?:\s+connection)?|connected to (?:the )?internet|am i online)\b',
         r'\b(what time|date today|active app|frontmost app|what app is active|which app is running|currently running app)\b',
         r'^\s*translate\b',
         r'^\s*say this in\b',
+        r'\bsearch\s+for\s+.+\s+in\s+.+',
+        r'\b(quit|close)\b.*\b(chrome|browser|safari|firefox|spotify|music|slack|discord|finder|notes|calendar|mail|figma|xcode|pycharm|calculator|settings|activity monitor|photos|messages|facetime|whatsapp|notion|zoom|teams|obsidian|arc)\b',
+        r'\b(focus|activate|switch to)\b.*\b(chrome|browser|safari|firefox|spotify|music|slack|discord|finder|notes|calendar|mail|figma|xcode|pycharm|calculator|settings|activity monitor|photos|messages|facetime|whatsapp|notion|zoom|teams|obsidian|arc)\b',
+        r'\bopen\s+url\s+\S+',
     ]
     for pattern in shell_markers:
         if re.search(pattern, q):
@@ -2309,6 +2555,12 @@ def _quick_truth_response(text: str) -> str | None:
         return "I can handle battery, volume, now playing, wifi, time, active app, translate, and safe file actions."
     if re.search(r"\b(are you there|can you hear me)\b", q):
         return "I'm here."
+    if re.search(r"\b(jarvis doctor|doctor jarvis|health check|diagnose jarvis)\b", q):
+        return (
+            "For mic issues, open System Settings, then Privacy and Microphone, and allow Terminal. "
+            "If the hotkey does nothing, add Terminal to Accessibility. "
+            "You can also run the status script in this folder from Terminal for a quick health check."
+        )
     return None
 
 
