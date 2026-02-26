@@ -32,6 +32,24 @@ echo "📦 Installing Python dependencies..."
 "$PYTHON" -m pip install --quiet --upgrade pip
 "$PYTHON" -m pip install --quiet speechrecognition pyaudio pynput requests webrtcvad setuptools
 
+echo "📦 Checking optional local STT dependencies..."
+if ! "$PYTHON" - <<'PY'
+import importlib.util
+mods = ("numpy", "faster_whisper")
+missing = [m for m in mods if importlib.util.find_spec(m) is None]
+raise SystemExit(1 if missing else 0)
+PY
+then
+  echo "📦 Installing optional local STT packages (numpy, faster-whisper)..."
+  if "$PYTHON" -m pip install --quiet numpy faster-whisper; then
+    echo "✅ Local STT packages installed."
+  else
+    echo "⚠️  Optional local STT install failed. Jarvis will use Google STT fallback."
+  fi
+else
+  echo "✅ Optional local STT packages already available."
+fi
+
 # Patch webrtcvad wrapper for Python 3.14+ where pkg_resources can be unavailable.
 WRTC="$($PYTHON -c 'import site, pathlib; print(pathlib.Path(site.getsitepackages()[0]) / "webrtcvad.py")' 2>/dev/null || true)"
 if [[ -n "${WRTC:-}" ]] && [[ -f "$WRTC" ]] && grep -q "pkg_resources" "$WRTC"; then

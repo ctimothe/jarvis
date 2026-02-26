@@ -35,6 +35,16 @@ except ImportError as e:
     print("   Run via:  bash workmode.sh  (it sets up the venv for you)")
     sys.exit(1)
 
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    from faster_whisper import WhisperModel
+except Exception:
+    WhisperModel = None
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -42,6 +52,9 @@ OLLAMA_URL        = "http://localhost:11434"
 MODEL             = "llama3.1:8b"
 HOME              = os.path.expanduser("~")
 LISTEN_CUE_MODE   = os.getenv("JARVIS_LISTEN_CUE", "beep").strip().lower()
+STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "auto").strip().lower()  # auto|local|google
+LOCAL_STT_MODEL   = os.getenv("JARVIS_LOCAL_STT_MODEL", "tiny.en").strip()
+LOCAL_STT_COMPUTE = os.getenv("JARVIS_LOCAL_STT_COMPUTE", "int8").strip()
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -49,10 +62,12 @@ VAD_FRAME_MS         = 30      # ms per frame  (10 / 20 / 30 only)
 VAD_FRAME_SAMPLES    = int(VAD_SAMPLE_RATE * VAD_FRAME_MS / 1000)   # 480 samples
 VAD_AGGRESSIVENESS   = 2       # 0=lenient … 3=aggressive non-speech filter
 PRE_ROLL_FRAMES      = 10      # ~300ms buffered before speech start (catches first syllable)
-SILENCE_END_FRAMES   = 30      # ~900ms of silence → end of utterance  (ChatGPT-like)
+SILENCE_END_FRAMES   = max(6, int(int(os.getenv("JARVIS_SILENCE_END_MS", "360")) / VAD_FRAME_MS))
 MIN_SPEECH_FRAMES    = 3       # ignore clicks / pops shorter than this
 MAX_RECORD_SECONDS   = 30      # safety ceiling
 STARTUP_TIMEOUT_S    = 8       # give up if no speech within this time
+LOCAL_STT_PARTIAL_MIN_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_MIN_MS", "800"))
+LOCAL_STT_PARTIAL_INTERVAL_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_INTERVAL_MS", "450"))
 
 
 # ─────────────────────────────────────────────
@@ -180,6 +195,63 @@ class SmartMic:
         self._vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self._pa  = pyaudio.PyAudio()
         self._rec = sr.Recognizer()
+        self._local_model = None
+        self._local_enabled = False
+        self._partial_min_frames = max(8, int(LOCAL_STT_PARTIAL_MIN_MS / VAD_FRAME_MS))
+        self._partial_interval_frames = max(6, int(LOCAL_STT_PARTIAL_INTERVAL_MS / VAD_FRAME_MS))
+        self._init_stt_backend()
+
+    def _init_stt_backend(self):
+        wants_local = STT_BACKEND in {"auto", "local"}
+        if not wants_local:
+            print("🧠 STT backend: google")
+            return
+        if WhisperModel is None or np is None:
+            if STT_BACKEND == "local":
+                print("⚠️  Local STT requested but dependencies are missing. Falling back to Google STT.")
+            return
+        try:
+            self._local_model = WhisperModel(LOCAL_STT_MODEL, compute_type=LOCAL_STT_COMPUTE)
+            self._local_enabled = True
+            print(f"🧠 STT backend: local ({LOCAL_STT_MODEL}, {LOCAL_STT_COMPUTE})")
+        except Exception as exc:
+            if STT_BACKEND == "local":
+                print(f"⚠️  Local STT model failed to load: {exc}. Falling back to Google STT.")
+
+    def _decode_local(self, raw: bytes, partial: bool = False) -> str:
+        if not self._local_enabled or self._local_model is None or not raw or np is None:
+            return ""
+        try:
+            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            segments, _ = self._local_model.transcribe(
+                pcm,
+                language="en",
+                beam_size=1,
+                best_of=1,
+                without_timestamps=True,
+                condition_on_previous_text=not partial,
+                vad_filter=False,
+                temperature=0.0,
+            )
+            text = " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
+            return text
+        except Exception as exc:
+            if not partial:
+                print(f"⚠️  Local STT error: {exc}")
+            return ""
+
+    def _decode_google(self, raw: bytes) -> str:
+        audio = sr.AudioData(raw, VAD_SAMPLE_RATE, 2)
+        try:
+            return self._rec.recognize_google(audio, language="en-US").strip()
+        except sr.UnknownValueError:
+            return ""
+        except sr.RequestError:
+            speak("Speech service unavailable.")
+            return ""
+        except Exception as exc:
+            print(f"⚠️  STT error: {exc}")
+            return ""
 
     def listen(self) -> str:
         stream = self._pa.open(
@@ -197,6 +269,8 @@ class SmartMic:
         silence_ct   = 0
         consec_voice = 0    # consecutive voiced frames needed to trigger
         total        = 0
+        speech_frames = 0
+        last_partial_text = ""
         max_frames   = int(MAX_RECORD_SECONDS * 1000 / VAD_FRAME_MS)
         wait_frames  = int(STARTUP_TIMEOUT_S  * 1000 / VAD_FRAME_MS)
 
@@ -216,12 +290,14 @@ class SmartMic:
                     if consec_voice >= MIN_SPEECH_FRAMES:
                         triggered = True
                         speech_buf.extend(pre_roll)   # include pre-roll
+                        speech_frames = len(pre_roll)
                         silence_ct = 0
                         print("🗨  Capturing speech…")
                     elif total > wait_frames:          # no speech in time
                         break
                 else:
                     speech_buf.append(frame)
+                    speech_frames += 1
                     if not is_speech:
                         silence_ct += 1
                         if silence_ct >= SILENCE_END_FRAMES:
@@ -229,6 +305,16 @@ class SmartMic:
                             break
                     else:
                         silence_ct = 0
+
+                    if (
+                        self._local_enabled
+                        and speech_frames >= self._partial_min_frames
+                        and speech_frames % self._partial_interval_frames == 0
+                    ):
+                        partial = self._decode_local(b"".join(speech_buf), partial=True)
+                        if partial and partial != last_partial_text:
+                            last_partial_text = partial
+                            print(f'📝 Partial: "{partial}"')
         finally:
             stream.stop_stream()
             stream.close()
@@ -237,20 +323,19 @@ class SmartMic:
             return ""
 
         raw = b"".join(speech_buf)
-        audio = sr.AudioData(raw, VAD_SAMPLE_RATE, 2)  # 2 bytes = Int16
-        try:
-            print("🔄 Recognising…")
-            text = self._rec.recognize_google(audio, language="en-US")
+        print("🔄 Recognising…")
+
+        # Prefer local low-latency STT if available.
+        if self._local_enabled:
+            text = self._decode_local(raw, partial=False)
             print(f'📝 You said: "{text}"')
-            return text
-        except sr.UnknownValueError:
-            return ""
-        except sr.RequestError:
-            speak("Speech service unavailable.")
-            return ""
-        except Exception as e:
-            print(f"⚠️  STT error: {e}")
-            return ""
+            if text:
+                return text
+
+        text = self._decode_google(raw)
+        if text:
+            print(f'📝 You said: "{text}"')
+        return text
 
 
 # ─────────────────────────────────────────────

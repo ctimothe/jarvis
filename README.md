@@ -22,3 +22,6 @@ Battery example:
 Latency tuning:
 - Default listen cue is a short beep (faster than spoken "Listening").
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
+- STT backend: `export JARVIS_STT_BACKEND=local` (or `auto` / `google`).
+- Local model: `export JARVIS_LOCAL_STT_MODEL=tiny.en` (or `base.en` for better accuracy).
+- End-of-speech cutoff: `export JARVIS_SILENCE_END_MS=300` (lower = faster, higher = safer).

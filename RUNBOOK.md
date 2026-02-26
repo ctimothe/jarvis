@@ -15,6 +15,11 @@
   - Execute pending plan: `execute mission`
   - Cancel pending plan: `cancel mission`
   - Get last summary: `mission report`
+- Low-latency/STT tuning:
+  - `export JARVIS_LISTEN_CUE=beep` (default), `speech`, or `none`
+  - `export JARVIS_STT_BACKEND=local` (`auto` or `google` also supported)
+  - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
+  - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
 
 ## Audit and metrics
 - Audit trail: `~/.jarvis_audit/audit.jsonl`
