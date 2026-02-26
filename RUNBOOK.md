@@ -17,13 +17,15 @@
   - Get last summary: `mission report`
 - Low-latency/STT tuning:
   - `export JARVIS_LISTEN_CUE=beep` (default), `speech`, or `none`
-  - `export JARVIS_STT_BACKEND=google` (default)
-  - `export JARVIS_STT_BACKEND=local` for local Whisper
+  - `export JARVIS_STT_BACKEND=apple_native` (default on macOS)
+  - `export JARVIS_STT_BACKEND=google` for cloud fallback
+  - `export JARVIS_STT_BACKEND=local` for local Whisper fallback
+  - `export JARVIS_APPLE_STT_LANGUAGE=en-US`
   - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
   - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
-  - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hybrid`)
+  - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`)
   - `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword`
   - `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800` to ignore wake detection right after Jarvis speaks
   - `export JARVIS_WAKEWORD_MAX_WORDS=4` for strict wake phrase filtering
@@ -48,6 +50,7 @@
 ## Audit and metrics
 - Audit trail: `~/.jarvis_audit/audit.jsonl`
 - Metrics stream: `~/.jarvis_audit/metrics.jsonl`
+- Primary speed KPI: `post_speech_to_response` (machine latency after you stop talking)
 - Quick inspect:
   - `tail -n 100 ~/.jarvis_audit/audit.jsonl`
   - `tail -n 100 ~/.jarvis_audit/metrics.jsonl`

@@ -34,11 +34,12 @@ Translation examples:
 Latency tuning:
 - Default listen cue is a short beep (faster than spoken "Listening").
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
-- STT backend defaults to `google`: `export JARVIS_STT_BACKEND=local` only when you want local Whisper.
+- STT backend defaults to `apple_native` on macOS for speed: `export JARVIS_STT_BACKEND=apple_native|google|local|auto`.
+- Apple Speech language: `export JARVIS_APPLE_STT_LANGUAGE=en-US`.
 - Local model: `export JARVIS_LOCAL_STT_MODEL=tiny.en` (or `base.en` for better accuracy).
 - End-of-speech cutoff: `export JARVIS_SILENCE_END_MS=300` (lower = faster, higher = safer).
 - Optional local package install: `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh`.
-- Trigger mode: `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hybrid`).
+- Trigger mode: `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hotkey`).
 - Wake backend: `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword` (default `stt_phrase`).
 - Wake guard against false triggers: `export JARVIS_WAKEWORD_TTS_GUARD_MS=1800`.
 - Wake phrase strictness: `export JARVIS_WAKEWORD_MAX_WORDS=4`.
@@ -46,3 +47,4 @@ Latency tuning:
 - Classifier mode: `export JARVIS_CLASSIFIER_MODE=rules|llm` (default `rules`).
 - Translation target default: `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`.
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.
+- If prompted, allow Speech Recognition + Microphone in macOS privacy settings for Apple-native STT.
