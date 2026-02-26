@@ -405,3 +405,16 @@ def test_openwakeword_engine_falls_back_cleanly(jarvis):
     assert engine.wait_for_wake() is True
     assert fallback.calls == 1
     engine.close()
+
+
+def test_parse_apple_stt_payload_snake_case(jarvis):
+    mic = jarvis.SmartMic.__new__(jarvis.SmartMic)
+    payload = (
+        '{"text":"hello","first_speech_ms":120,"speech_duration_ms":410,'
+        '"speech_end_to_transcript_ms":95,"recognition_total_ms":720,"error":""}'
+    )
+    text, capture = jarvis.SmartMic._parse_apple_stt_payload(mic, payload, 720)
+    assert text == "hello"
+    assert capture["cue_to_speech_start_ms"] == 120
+    assert capture["speech_duration_ms"] == 410
+    assert capture["speech_end_to_transcript_ms"] == 95
