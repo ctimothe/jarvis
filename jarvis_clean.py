@@ -17,6 +17,7 @@ import json
 import uuid
 import queue
 import resource
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,10 +48,10 @@ OLLAMA_URL        = "http://localhost:11434"
 MODEL             = "llama3.1:8b"
 HOME              = os.path.expanduser("~")
 LISTEN_CUE_MODE   = os.getenv("JARVIS_LISTEN_CUE", "beep").strip().lower()
-STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "google").strip().lower()  # auto|local|google
+STT_BACKEND       = os.getenv("JARVIS_STT_BACKEND", "apple_native").strip().lower()  # auto|apple_native|local|google
 LOCAL_STT_MODEL   = os.getenv("JARVIS_LOCAL_STT_MODEL", "tiny.en").strip()
 LOCAL_STT_COMPUTE = os.getenv("JARVIS_LOCAL_STT_COMPUTE", "int8").strip()
-TRIGGER_MODE      = os.getenv("JARVIS_TRIGGER_MODE", "hybrid").strip().lower()  # hotkey|wake|hybrid
+TRIGGER_MODE      = os.getenv("JARVIS_TRIGGER_MODE", "hotkey").strip().lower()  # hotkey|wake|hybrid
 VAD_PROFILE       = os.getenv("JARVIS_VAD_PROFILE", "fast").strip().lower()  # fast|balanced|robust
 WAKEWORD_BACKEND  = os.getenv("JARVIS_WAKEWORD_BACKEND", "stt_phrase").strip().lower()
 TRANSLATION_BACKEND = os.getenv("JARVIS_TRANSLATION_BACKEND", "local").strip().lower()
@@ -60,6 +61,8 @@ CLASSIFIER_MODE   = os.getenv("JARVIS_CLASSIFIER_MODE", "rules").strip().lower()
 WAKEWORD_MIN_INTERVAL_MS = int(os.getenv("JARVIS_WAKEWORD_MIN_INTERVAL_MS", "1200"))
 WAKEWORD_TTS_GUARD_MS = int(os.getenv("JARVIS_WAKEWORD_TTS_GUARD_MS", "1800"))
 WAKEWORD_MAX_WORDS = int(os.getenv("JARVIS_WAKEWORD_MAX_WORDS", "4"))
+APPLE_STT_LANGUAGE = os.getenv("JARVIS_APPLE_STT_LANGUAGE", "en-US").strip()
+APPLE_STT_TIMEOUT_PADDING_S = int(os.getenv("JARVIS_APPLE_STT_TIMEOUT_PADDING_S", "4"))
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -228,6 +231,9 @@ class SmartMic:
         self._vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self._pa  = pyaudio.PyAudio()
         self._rec = sr.Recognizer()
+        self._stt_mode = "google"
+        self._apple_native_enabled = False
+        self._apple_stt_binary: str | None = None
         self._local_model = None
         self._local_enabled = False
         self._partial_min_frames = max(8, int(LOCAL_STT_PARTIAL_MIN_MS / VAD_FRAME_MS))
@@ -235,30 +241,178 @@ class SmartMic:
         self.last_capture_info: dict[str, int] = {}
         self._init_stt_backend()
 
-    def _init_stt_backend(self):
-        wants_local = STT_BACKEND in {"auto", "local"}
-        if not wants_local:
-            print("🧠 STT backend: google")
-            return
+    def _ensure_apple_stt_binary(self) -> str | None:
+        if platform.system() != "Darwin":
+            return None
+        if shutil.which("xcrun") is None:
+            print("⚠️  xcrun not found. Apple native STT unavailable.")
+            return None
+
+        src = Path(__file__).resolve().parent / "scripts" / "apple_stt_once.swift"
+        if not src.exists():
+            print("⚠️  Apple STT source script is missing. Falling back to another STT backend.")
+            return None
+
+        cache_dir = Path(HOME) / ".jarvis_cache" / "bin"
+        binary = cache_dir / "apple_stt_once"
+        needs_build = (not binary.exists()) or (src.stat().st_mtime > binary.stat().st_mtime)
+        if needs_build:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            compile_cmd = [
+                "xcrun",
+                "swiftc",
+                "-O",
+                str(src),
+                "-framework",
+                "Speech",
+                "-framework",
+                "AVFoundation",
+                "-o",
+                str(binary),
+            ]
+            build = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=45)
+            if build.returncode != 0:
+                print(f"⚠️  Apple STT build failed: {(build.stderr or build.stdout).strip()[:260]}")
+                return None
+        return str(binary)
+
+    def _init_apple_native_backend(self) -> bool:
+        binary = self._ensure_apple_stt_binary()
+        if not binary:
+            return False
+        self._apple_stt_binary = binary
+        self._apple_native_enabled = True
+        self._stt_mode = "apple_native"
+        print("🧠 STT backend: apple_native (on-device)")
+        return True
+
+    def _init_local_backend(self, explicit_request: bool) -> bool:
         if np is None:
-            if STT_BACKEND == "local":
-                print("⚠️  Local STT requested but numpy is missing. Falling back to Google STT.")
-            return
+            if explicit_request:
+                print("⚠️  Local STT requested but numpy is missing.")
+            return False
         whisper_model_cls = None
         try:
             from faster_whisper import WhisperModel as _WhisperModel
             whisper_model_cls = _WhisperModel
         except Exception as exc:
-            if STT_BACKEND == "local":
-                print(f"⚠️  Local STT import failed: {exc}. Falling back to Google STT.")
-            return
+            if explicit_request:
+                print(f"⚠️  Local STT import failed: {exc}.")
+            return False
         try:
             self._local_model = whisper_model_cls(LOCAL_STT_MODEL, compute_type=LOCAL_STT_COMPUTE)
             self._local_enabled = True
+            self._stt_mode = "local"
             print(f"🧠 STT backend: local ({LOCAL_STT_MODEL}, {LOCAL_STT_COMPUTE})")
+            return True
         except Exception as exc:
-            if STT_BACKEND == "local":
-                print(f"⚠️  Local STT model failed to load: {exc}. Falling back to Google STT.")
+            if explicit_request:
+                print(f"⚠️  Local STT model failed to load: {exc}.")
+            return False
+
+    def _init_stt_backend(self):
+        requested = STT_BACKEND
+
+        if requested in {"apple_native", "apple", "native"}:
+            if self._init_apple_native_backend():
+                return
+            print("⚠️  Falling back to Google STT.")
+            self._stt_mode = "google"
+            print("🧠 STT backend: google")
+            return
+
+        if requested in {"auto"}:
+            if self._init_apple_native_backend():
+                return
+            if self._init_local_backend(explicit_request=False):
+                return
+            self._stt_mode = "google"
+            print("🧠 STT backend: google")
+            return
+
+        if requested == "local":
+            if self._init_local_backend(explicit_request=True):
+                return
+            print("⚠️  Falling back to Google STT.")
+            self._stt_mode = "google"
+            print("🧠 STT backend: google")
+            return
+
+        self._stt_mode = "google"
+        print("🧠 STT backend: google")
+
+    def _decode_apple_native(
+        self,
+        max_record_seconds: int,
+        startup_timeout_s: int,
+    ) -> tuple[str, dict[str, int]]:
+        if not self._apple_native_enabled or not self._apple_stt_binary:
+            return "", {}
+        cmd = [
+            self._apple_stt_binary,
+            "--max-seconds", str(max_record_seconds),
+            "--startup-timeout", str(startup_timeout_s),
+            "--language", APPLE_STT_LANGUAGE,
+        ]
+        started = time.time()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max_record_seconds + APPLE_STT_TIMEOUT_PADDING_S,
+            )
+        except subprocess.TimeoutExpired:
+            return "", {"speech_end_to_transcript_ms": int((time.time() - started) * 1000)}
+        except Exception as exc:
+            print(f"⚠️  Apple STT invoke error: {exc}")
+            return "", {"speech_end_to_transcript_ms": int((time.time() - started) * 1000)}
+
+        elapsed_ms = int((time.time() - started) * 1000)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout).strip()
+            if err:
+                print(f"⚠️  Apple STT error: {err[:220]}")
+            return "", {"speech_end_to_transcript_ms": elapsed_ms}
+
+        payload = (result.stdout or "").strip()
+        if not payload:
+            return "", {"speech_end_to_transcript_ms": elapsed_ms}
+
+        parsed: dict[str, Any]
+        try:
+            parsed = json.loads(payload.splitlines()[-1])
+        except Exception:
+            return payload, {"speech_end_to_transcript_ms": elapsed_ms}
+
+        if not isinstance(parsed, dict):
+            return "", {"speech_end_to_transcript_ms": elapsed_ms}
+
+        error = str(parsed.get("error", "")).strip()
+        if error:
+            print(f"⚠️  Apple STT: {error}")
+
+        text = str(parsed.get("text", "")).strip()
+        capture: dict[str, int] = {}
+        first_speech_ms = parsed.get("first_speech_ms")
+        if isinstance(first_speech_ms, (int, float)):
+            capture["cue_to_speech_start_ms"] = int(first_speech_ms)
+
+        end_to_text_ms = parsed.get("speech_end_to_transcript_ms")
+        if isinstance(end_to_text_ms, (int, float)):
+            capture["speech_end_to_transcript_ms"] = int(end_to_text_ms)
+        else:
+            recognition_total_ms = parsed.get("recognition_total_ms")
+            if isinstance(recognition_total_ms, (int, float)):
+                capture["speech_end_to_transcript_ms"] = int(recognition_total_ms)
+            else:
+                capture["speech_end_to_transcript_ms"] = elapsed_ms
+
+        speech_duration_ms = parsed.get("speech_duration_ms")
+        if isinstance(speech_duration_ms, (int, float)):
+            capture["speech_duration_ms"] = int(speech_duration_ms)
+
+        return text, capture
 
     def _decode_local(self, raw: bytes, partial: bool = False) -> str:
         if not self._local_enabled or self._local_model is None or not raw or np is None:
@@ -303,6 +457,21 @@ class SmartMic:
         show_partials: bool = True,
         show_transcript: bool = True,
     ) -> str:
+        requested_max = max_record_seconds or MAX_RECORD_SECONDS
+        requested_startup = startup_timeout_s or STARTUP_TIMEOUT_S
+        if self._apple_native_enabled:
+            if announce:
+                print("👂 Listening (Apple Speech)…")
+                print("🔄 Recognising…")
+            text, capture = self._decode_apple_native(
+                max_record_seconds=requested_max,
+                startup_timeout_s=requested_startup,
+            )
+            if show_transcript and text:
+                print(f'📝 You said: "{text}"')
+            self.last_capture_info = capture
+            return text
+
         started_at = time.time()
         stream = self._pa.open(
             format=pyaudio.paInt16,
@@ -321,8 +490,8 @@ class SmartMic:
         total        = 0
         speech_frames = 0
         last_partial_text = ""
-        max_frames   = int((max_record_seconds or MAX_RECORD_SECONDS) * 1000 / VAD_FRAME_MS)
-        wait_frames  = int((startup_timeout_s or STARTUP_TIMEOUT_S) * 1000 / VAD_FRAME_MS)
+        max_frames   = int(requested_max * 1000 / VAD_FRAME_MS)
+        wait_frames  = int(requested_startup * 1000 / VAD_FRAME_MS)
         speech_started_at: float | None = None
 
         if announce:
@@ -393,6 +562,7 @@ class SmartMic:
                 self.last_capture_info = {
                     "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
                     "speech_end_to_transcript_ms": int((time.time() - speech_ended_at) * 1000),
+                    "speech_duration_ms": int((speech_ended_at - (speech_started_at or speech_ended_at)) * 1000),
                 }
                 return text
 
@@ -403,6 +573,7 @@ class SmartMic:
         self.last_capture_info = {
             "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
             "speech_end_to_transcript_ms": int((time.time() - speech_ended_at) * 1000),
+            "speech_duration_ms": int((speech_ended_at - (speech_started_at or speech_ended_at)) * 1000),
         }
         return text
 
@@ -767,7 +938,7 @@ _LATENCY_BUDGET_MS = {
     "cue_to_speech_start": 250,
     "speech_end_to_transcript": 700,
     "transcript_to_response": 500,
-    "roundtrip_total": 1200,
+    "post_speech_to_response": 1200,
 }
 
 
@@ -928,7 +1099,7 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if re.search(r'\b(what time|time now|current time|date today|today.?s date)\b', lower):
         return ActionRequest(action=ACTION_TIME_STATUS, args={}, principal=principal, reason=text)
 
-    if re.search(r'\b(active app|frontmost app|which app.*open|focused app|what app is active)\b', lower):
+    if re.search(r'\b(active app|frontmost app|which app.*open|focused app|what app is active|which app is running|currently running app|active .* currently running)\b', lower):
         return ActionRequest(action=ACTION_ACTIVE_APP, args={}, principal=principal, reason=text)
 
     match = re.search(r'\bgit\s+status(?:\s+in\s+(.+))?$', lower)
@@ -1664,7 +1835,7 @@ def _classify_by_rules(text: str) -> str | None:
         r'\b(volume level|current volume|sound level|mute status)\b',
         r'\b(now playing|what song|song.*playing|currently playing|current song)\b',
         r'\b(wi[- ]?fi|ssid|network name|network am i on|what network)\b',
-        r'\b(what time|date today|active app|frontmost app|what app is active)\b',
+        r'\b(what time|date today|active app|frontmost app|what app is active|which app is running|currently running app)\b',
         r'^\s*translate\b',
         r'^\s*say this in\b',
     ]
@@ -1784,6 +1955,7 @@ class Jarvis:
         self._smart_mic           = None
         self._pressed: set        = set()
         self._last_trigger: float = 0.0
+        self._last_interrupt_notice: float = 0.0
         self._stop_event          = threading.Event()
         self._wake_engine: WakeWordEngine | None = None
         self._wake_thread: threading.Thread | None = None
@@ -1795,13 +1967,19 @@ class Jarvis:
         try:
             self._smart_mic = SmartMic()
             _global_mic = self._smart_mic
-            print("✅ Smart mic ready (WebRTC VAD)")
+            backend_name = getattr(self._smart_mic, "_stt_mode", STT_BACKEND)
+            if backend_name == "apple_native":
+                print("✅ Smart mic ready (Apple Speech)")
+            else:
+                print("✅ Smart mic ready (WebRTC VAD)")
         except Exception as e:
             print(f"⚠️  Mic init error: {e}")
             print("   Grant mic access: System Settings → Privacy → Microphone")
 
     def _init_trigger_mode(self):
         if TRIGGER_MODE in {"wake", "hybrid"} and self._smart_mic:
+            if getattr(self._smart_mic, "_stt_mode", "") == "apple_native" and WAKEWORD_BACKEND == "stt_phrase":
+                print("⚠️  Wake backend stt_phrase + apple_native STT can feel slow. Use hotkey mode for best speed.")
             stt_phrase_engine = STTPhraseWakeWordEngine(self._smart_mic)
             if WAKEWORD_BACKEND == "openwakeword":
                 self._wake_engine = OpenWakeWordEngine(fallback=stt_phrase_engine)
@@ -1849,8 +2027,11 @@ class Jarvis:
 
     def activate(self):
         if not self._busy.acquire(blocking=False):
-            stop_speaking()
-            print("⏳ Interrupted — press again to speak.")
+            now = time.monotonic()
+            if now - self._last_interrupt_notice > 1.0:
+                stop_speaking()
+                print("⏳ Interrupted — press again to speak.")
+                self._last_interrupt_notice = now
             return
 
         def _run():
@@ -1867,10 +2048,16 @@ class Jarvis:
                 if capture:
                     _latency_metric("cue_to_speech_start", int(capture.get("cue_to_speech_start_ms", 0)))
                     _latency_metric("speech_end_to_transcript", int(capture.get("speech_end_to_transcript_ms", 0)))
+                    if "speech_duration_ms" in capture:
+                        _latency_metric("speech_duration", int(capture.get("speech_duration_ms", 0)))
                 if text:
                     t_transcript = time.perf_counter()
                     response = route(text)
-                    _latency_metric("transcript_to_response", int((time.perf_counter() - t_transcript) * 1000))
+                    transcript_to_response_ms = int((time.perf_counter() - t_transcript) * 1000)
+                    _latency_metric("transcript_to_response", transcript_to_response_ms)
+                    if capture:
+                        post_speech_ms = int(capture.get("speech_end_to_transcript_ms", 0)) + transcript_to_response_ms
+                        _latency_metric("post_speech_to_response", post_speech_ms)
                     if response:
                         speak(response)
                 _latency_metric("roundtrip_total", int((time.perf_counter() - t0) * 1000))
