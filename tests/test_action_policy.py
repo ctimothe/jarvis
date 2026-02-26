@@ -418,3 +418,14 @@ def test_parse_apple_stt_payload_snake_case(jarvis):
     assert capture["cue_to_speech_start_ms"] == 120
     assert capture["speech_duration_ms"] == 410
     assert capture["speech_end_to_transcript_ms"] == 95
+
+
+def test_apple_privacy_guidance_forces_google_fallback(jarvis, monkeypatch):
+    mic = jarvis.SmartMic.__new__(jarvis.SmartMic)
+    mic._apple_native_enabled = True
+    mic._stt_mode = "apple_native"
+    mic._apple_daemon_proc = None
+    monkeypatch.setattr(jarvis, "APPLE_STT_BUNDLE_ID", "com.jarvis.speechhelper")
+    jarvis.SmartMic._apple_stt_privacy_guidance(mic)
+    assert mic._apple_native_enabled is False
+    assert mic._stt_mode == "google"
