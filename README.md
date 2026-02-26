@@ -36,6 +36,8 @@ Latency tuning:
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
 - STT backend defaults to `apple_native` on macOS for speed: `export JARVIS_STT_BACKEND=apple_native|google|local|auto`.
 - Apple Speech language: `export JARVIS_APPLE_STT_LANGUAGE=en-US`.
+- Apple strict endpoint close: `export JARVIS_APPLE_STT_SILENCE_END_MS=420` and `export JARVIS_APPLE_STT_MIN_SPEECH_MS=170`.
+- Apple energy gate tuning: `export JARVIS_APPLE_STT_ENERGY_FLOOR=0.010` and `export JARVIS_APPLE_STT_ENERGY_MULTIPLIER=2.0`.
 - Local model: `export JARVIS_LOCAL_STT_MODEL=tiny.en` (or `base.en` for better accuracy).
 - End-of-speech cutoff: `export JARVIS_SILENCE_END_MS=300` (lower = faster, higher = safer).
 - Optional local package install: `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh`.
@@ -51,3 +53,4 @@ Latency tuning:
 - Response style: `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`.
 - If prompted, allow Speech Recognition + Microphone in macOS privacy settings for Apple-native STT.
 - Apple-native STT runs as a persistent local daemon process for faster follow-up turns.
+- Strict preset for fast close: `JARVIS_APPLE_STT_SILENCE_END_MS=320` and `JARVIS_APPLE_STT_ENERGY_MULTIPLIER=2.4`.

@@ -21,6 +21,8 @@
   - `export JARVIS_STT_BACKEND=google` for cloud fallback
   - `export JARVIS_STT_BACKEND=local` for local Whisper fallback
   - `export JARVIS_APPLE_STT_LANGUAGE=en-US`
+  - `export JARVIS_APPLE_STT_SILENCE_END_MS=420` and `export JARVIS_APPLE_STT_MIN_SPEECH_MS=170`
+  - `export JARVIS_APPLE_STT_ENERGY_FLOOR=0.010` and `export JARVIS_APPLE_STT_ENERGY_MULTIPLIER=2.0`
   - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
   - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
@@ -54,6 +56,7 @@
 - Metrics stream: `~/.jarvis_audit/metrics.jsonl`
 - Primary speed KPI: `post_speech_to_response` (machine latency after you stop talking)
 - Apple STT process model: persistent daemon (`scripts/apple_stt_once.swift --daemon`) to avoid cold-start per turn
+- For strict early close, lower `JARVIS_APPLE_STT_SILENCE_END_MS` to `300-340` and raise `JARVIS_APPLE_STT_ENERGY_MULTIPLIER` to `2.2-2.6`
 - Quick inspect:
   - `tail -n 100 ~/.jarvis_audit/audit.jsonl`
   - `tail -n 100 ~/.jarvis_audit/metrics.jsonl`
