@@ -19,6 +19,7 @@ import queue
 import resource
 import shutil
 import select
+import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,13 @@ MAX_RECORD_SECONDS   = 30      # safety ceiling
 STARTUP_TIMEOUT_S    = 8       # give up if no speech within this time
 LOCAL_STT_PARTIAL_MIN_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_MIN_MS", "800"))
 LOCAL_STT_PARTIAL_INTERVAL_MS = int(os.getenv("JARVIS_LOCAL_PARTIAL_INTERVAL_MS", "450"))
+LOCAL_STT_BEAM_SIZE = int(os.getenv("JARVIS_LOCAL_STT_BEAM_SIZE", "3"))
+LOCAL_STT_BEST_OF = int(os.getenv("JARVIS_LOCAL_STT_BEST_OF", "3"))
+LOCAL_STT_CONDITION_ON_PREVIOUS = os.getenv("JARVIS_LOCAL_STT_CONDITION_ON_PREVIOUS", "0").strip() == "1"
+LOCAL_STT_INITIAL_PROMPT = os.getenv(
+    "JARVIS_LOCAL_STT_INITIAL_PROMPT",
+    "jarvis battery health wifi internet volume now playing spotify active app",
+).strip()
 
 _VAD_PROFILE_PRESETS = {
     "fast": {"aggressiveness": 2, "silence_end_ms": 280},
@@ -677,15 +685,20 @@ class SmartMic:
             return ""
         try:
             pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            beam_size = 1 if partial else max(1, LOCAL_STT_BEAM_SIZE)
+            best_of = 1 if partial else max(1, LOCAL_STT_BEST_OF)
+            initial_prompt = None if partial else (LOCAL_STT_INITIAL_PROMPT or None)
+            condition_on_previous = False if partial else LOCAL_STT_CONDITION_ON_PREVIOUS
             segments, _ = self._local_model.transcribe(
                 pcm,
                 language="en",
-                beam_size=1,
-                best_of=1,
+                beam_size=beam_size,
+                best_of=best_of,
                 without_timestamps=True,
-                condition_on_previous_text=not partial,
+                condition_on_previous_text=condition_on_previous,
                 vad_filter=False,
                 temperature=0.0,
+                initial_prompt=initial_prompt,
             )
             text = " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
             return text
@@ -1282,6 +1295,7 @@ _translator_lock = threading.Lock()
 
 _LATENCY_BUDGET_MS = {
     "cue_to_speech_start": 250,
+    "speech_duration": 4500,
     "speech_end_to_transcript": 700,
     "transcript_to_response": 500,
     "post_speech_to_response": 1200,
@@ -1440,9 +1454,21 @@ def _parse_translation_request(query: str) -> tuple[str, str, str] | None:
     return None
 
 
+def _tokenize_lower(text: str) -> list[str]:
+    return [w for w in re.sub(r"[^a-z0-9\s]", " ", text.lower()).split() if w]
+
+
+def _has_close_token(tokens: list[str], targets: list[str], cutoff: float = 0.74) -> bool:
+    for token in tokens:
+        if difflib.get_close_matches(token, targets, n=1, cutoff=cutoff):
+            return True
+    return False
+
+
 def _build_action_request(query: str) -> ActionRequest | None:
     text = query.strip()
     lower = text.lower()
+    tokens = _tokenize_lower(text)
     principal = _principal()
 
     parsed_translation = _parse_translation_request(text)
@@ -1464,10 +1490,19 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if re.search(r'\b(volume level|what.*volume|volume status|current volume|sound level)\b', lower):
         return ActionRequest(action=ACTION_VOLUME_STATUS, args={}, principal=principal, reason=text)
 
-    if re.search(r'\b(what song|what.?s.*playing|song.*playing|now playing|currently(?:\s+being)?\s+played|currently.*playing|track playing|current song|being played)\b', lower):
+    song_phrase = re.search(r'\b(what song|what.?s.*playing|song.*playing|now playing|currently(?:\s+being)?\s+played|currently.*playing|track playing|current song|being played)\b', lower)
+    approx_song_status = (
+        ("song" in tokens or "track" in tokens)
+        and not lower.strip().startswith("play ")
+        and (
+            _has_close_token(tokens, ["playing", "played", "currently", "current", "now"], cutoff=0.66)
+            or len(tokens) <= 3
+        )
+    )
+    if song_phrase or approx_song_status:
         return ActionRequest(action=ACTION_NOW_PLAYING, args={}, principal=principal, reason=text)
 
-    if re.search(r'\b(wi[- ]?fi|wireless network|network name|network am i on|what network|ssid)\b', lower):
+    if re.search(r'\b(wi[- ]?fi|wireless network|network name|network am i on|what network|ssid|internet(?:\s+connection)?|connected to (?:the )?internet|am i online|connected online)\b', lower):
         return ActionRequest(action=ACTION_WIFI_STATUS, args={}, principal=principal, reason=text)
 
     if re.search(r'\b(what time|time now|current time|date today|today.?s date)\b', lower):
@@ -2208,7 +2243,7 @@ def _classify_by_rules(text: str) -> str | None:
         r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count|charging|power adapter)\b',
         r'\b(volume level|current volume|sound level|mute status)\b',
         r'\b(now playing|what song|what.?s.*playing|song.*playing|currently(?:\s+being)?\s+played|currently.*playing|current song|being played)\b',
-        r'\b(wi[- ]?fi|ssid|network name|network am i on|what network)\b',
+        r'\b(wi[- ]?fi|ssid|network name|network am i on|what network|internet(?:\s+connection)?|connected to (?:the )?internet|am i online)\b',
         r'\b(what time|date today|active app|frontmost app|what app is active|which app is running|currently running app)\b',
         r'^\s*translate\b',
         r'^\s*say this in\b',
