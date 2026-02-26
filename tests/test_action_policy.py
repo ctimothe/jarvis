@@ -129,6 +129,30 @@ def test_build_battery_request(jarvis):
     assert request.action == jarvis.ACTION_BATTERY_STATUS
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_action"),
+    [
+        ("what is my volume level", "ACTION_VOLUME_STATUS"),
+        ("what song is playing", "ACTION_NOW_PLAYING"),
+        ("am i on wifi", "ACTION_WIFI_STATUS"),
+        ("what time is it", "ACTION_TIME_STATUS"),
+        ("what app is active", "ACTION_ACTIVE_APP"),
+        ('translate "hello" to spanish', "ACTION_TRANSLATE_TEXT"),
+    ],
+)
+def test_build_new_status_requests(jarvis, query, expected_action):
+    request = jarvis._build_action_request(query)
+    assert request is not None
+    assert request.action == getattr(jarvis, expected_action)
+
+
+def test_parse_translation_default_target(jarvis):
+    request = jarvis._build_action_request("translate hello")
+    assert request is not None
+    assert request.action == jarvis.ACTION_TRANSLATE_TEXT
+    assert request.args["target_lang"] == jarvis.TRANSLATION_DEFAULT_TARGET
+
+
 def test_policy_blocks_protected_paths(jarvis):
     request = jarvis.ActionRequest(
         action=jarvis.ACTION_LIST_PATH,
@@ -215,6 +239,12 @@ def test_classify_battery_as_shell(jarvis):
     assert intent == "SHELL"
 
 
+def test_classify_new_status_queries_as_shell(jarvis):
+    assert jarvis._classify("what song is currently playing") == "SHELL"
+    assert jarvis._classify("what app is active") == "SHELL"
+    assert jarvis._classify("translate hello to spanish") == "SHELL"
+
+
 def test_classify_pause_music_as_music(jarvis):
     intent = jarvis._classify("pause the music")
     assert intent == "MUSIC"
@@ -229,6 +259,12 @@ def test_route_structured_query_bypasses_classifier(jarvis, monkeypatch):
     assert response == "shell handled"
 
 
+def test_deterministic_layer_handles_translation(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "handle_shell", lambda _text: "translated")
+    response = jarvis.route("translate hello to spanish")
+    assert response == "translated"
+
+
 def test_extract_battery_summary(jarvis):
     pmset_output = "Now drawing from 'Battery Power'\\n -InternalBattery-0\\t81%; discharging; 4:10 remaining present: true\\n"
     profiler_output = "Cycle Count: 120\\nCondition: Normal\\nMaximum Capacity: 92%\\n"
@@ -240,6 +276,85 @@ def test_extract_battery_summary(jarvis):
     assert "cycle count 120" in summary
 
 
+def test_run_volume_status_action_parsing(jarvis, monkeypatch):
+    fake = jarvis.ActionResult(True, 0, "52|false", "", 10, "osascript")
+    monkeypatch.setattr(jarvis, "_run_safe_process", lambda *args, **kwargs: fake)
+    result = jarvis._run_volume_status_action()
+    assert result.ok is True
+    assert "52 percent" in result.stdout
+
+
+def test_run_now_playing_action_fallback(jarvis, monkeypatch):
+    spotify_empty = jarvis.ActionResult(False, 1, "", "not running", 8, "osascript spotify")
+    music_playing = jarvis.ActionResult(True, 0, "Everlong by Foo Fighters", "", 8, "osascript music")
+    calls = iter([spotify_empty, music_playing])
+    monkeypatch.setattr(jarvis, "_run_safe_process", lambda *args, **kwargs: next(calls))
+    result = jarvis._run_now_playing_action()
+    assert result.ok is True
+    assert "Everlong" in result.stdout
+
+
+def test_run_wifi_status_action_parsing(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "_detect_wifi_device", lambda: "en0")
+    wifi_result = jarvis.ActionResult(True, 0, "Current Wi-Fi Network: MyWifi", "", 7, "networksetup")
+    monkeypatch.setattr(jarvis, "_run_safe_process", lambda *args, **kwargs: wifi_result)
+    result = jarvis._run_wifi_status_action()
+    assert result.ok is True
+    assert "MyWifi" in result.stdout
+
+
+def test_local_dictionary_translation(jarvis):
+    translated = jarvis._translate_text_local("hello", "spanish", "english")
+    assert translated == "hola"
+
+
+def test_truth_policy_guard(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "RESPONSE_STYLE", "truth_concise")
+    response = jarvis.route("any news with system status")
+    assert "couldn't verify" in response.lower()
+
+
 def test_route_wake_up_short_response(jarvis):
     response = jarvis.route("wake up")
     assert response == "I'm here and ready."
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "is my laptop charging",
+        "what is my volume level",
+        "what song is playing",
+        "what network am i on",
+        "what app is active",
+        "translate hello to spanish",
+        "check battery health",
+        "show disk usage",
+        "git status in ~/code",
+        "create folder called demo",
+        "list files in ~/Documents",
+        "find notes.txt in ~/Documents",
+        "move ~/a to ~/b",
+        "copy ~/a to ~/b",
+        "rename ~/a to ~/b",
+        "delete ~/tmp-file",
+        "what time is it",
+        "date today",
+        "ssid status",
+        "current song",
+        "maximum capacity battery",
+        "active app please",
+        "translate good morning to french",
+        "say this in spanish: hello",
+        "wifi status",
+        "volume status",
+        "track playing",
+        "time now",
+        "frontmost app",
+        "translate thank you",
+    ],
+)
+def test_canonical_queries_hit_deterministic_layer(jarvis, monkeypatch, query):
+    monkeypatch.setattr(jarvis, "handle_shell", lambda _text: "ok")
+    response = jarvis.route(query)
+    assert response == "ok"
