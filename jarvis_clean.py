@@ -56,6 +56,10 @@ WAKEWORD_BACKEND  = os.getenv("JARVIS_WAKEWORD_BACKEND", "stt_phrase").strip().l
 TRANSLATION_BACKEND = os.getenv("JARVIS_TRANSLATION_BACKEND", "local").strip().lower()
 TRANSLATION_DEFAULT_TARGET = os.getenv("JARVIS_TRANSLATION_DEFAULT_TARGET", "spanish").strip().lower()
 RESPONSE_STYLE    = os.getenv("JARVIS_RESPONSE_STYLE", "truth_concise").strip().lower()  # truth_concise|balanced
+CLASSIFIER_MODE   = os.getenv("JARVIS_CLASSIFIER_MODE", "rules").strip().lower()  # rules|llm
+WAKEWORD_MIN_INTERVAL_MS = int(os.getenv("JARVIS_WAKEWORD_MIN_INTERVAL_MS", "1200"))
+WAKEWORD_TTS_GUARD_MS = int(os.getenv("JARVIS_WAKEWORD_TTS_GUARD_MS", "1800"))
+WAKEWORD_MAX_WORDS = int(os.getenv("JARVIS_WAKEWORD_MAX_WORDS", "4"))
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -83,6 +87,7 @@ SILENCE_END_FRAMES = max(6, int(_silence_end_ms / VAD_FRAME_MS))
 # TTS  — macOS `say`, interruptible
 # ─────────────────────────────────────────────
 _say_proc: subprocess.Popen | None = None
+_last_tts_started_monotonic: float = 0.0
 
 def stop_speaking():
     """Kill any currently running `say` process."""
@@ -97,11 +102,19 @@ def speak(text: str, wait: bool = False):
     so Jarvis doesn't hear its own voice.
     """
     global _say_proc
+    global _last_tts_started_monotonic
     stop_speaking()
     print(f"🗣  Jarvis: {text}")
+    _last_tts_started_monotonic = time.monotonic()
     _say_proc = subprocess.Popen(["say", "-r", "185", text])
     if wait:
         _say_proc.wait()
+
+
+def _recent_tts_activity(within_ms: int) -> bool:
+    if _last_tts_started_monotonic <= 0:
+        return False
+    return ((time.monotonic() - _last_tts_started_monotonic) * 1000.0) <= float(within_ms)
 
 
 # ─────────────────────────────────────────────
@@ -282,7 +295,14 @@ class SmartMic:
             print(f"⚠️  STT error: {exc}")
             return ""
 
-    def listen(self, max_record_seconds: int | None = None, startup_timeout_s: int | None = None) -> str:
+    def listen(
+        self,
+        max_record_seconds: int | None = None,
+        startup_timeout_s: int | None = None,
+        announce: bool = True,
+        show_partials: bool = True,
+        show_transcript: bool = True,
+    ) -> str:
         started_at = time.time()
         stream = self._pa.open(
             format=pyaudio.paInt16,
@@ -305,7 +325,8 @@ class SmartMic:
         wait_frames  = int((startup_timeout_s or STARTUP_TIMEOUT_S) * 1000 / VAD_FRAME_MS)
         speech_started_at: float | None = None
 
-        print("👂 Listening (VAD)…")
+        if announce:
+            print("👂 Listening (VAD)…")
         try:
             while total < max_frames:
                 try:
@@ -324,7 +345,8 @@ class SmartMic:
                         speech_frames = len(pre_roll)
                         speech_started_at = time.time()
                         silence_ct = 0
-                        print("🗨  Capturing speech…")
+                        if announce:
+                            print("🗨  Capturing speech…")
                     elif total > wait_frames:          # no speech in time
                         break
                 else:
@@ -333,7 +355,8 @@ class SmartMic:
                     if not is_speech:
                         silence_ct += 1
                         if silence_ct >= SILENCE_END_FRAMES:
-                            print("⏹  End of speech.")
+                            if announce:
+                                print("⏹  End of speech.")
                             break
                     else:
                         silence_ct = 0
@@ -346,7 +369,8 @@ class SmartMic:
                         partial = self._decode_local(b"".join(speech_buf), partial=True)
                         if partial and partial != last_partial_text:
                             last_partial_text = partial
-                            print(f'📝 Partial: "{partial}"')
+                            if show_partials:
+                                print(f'📝 Partial: "{partial}"')
         finally:
             stream.stop_stream()
             stream.close()
@@ -357,12 +381,14 @@ class SmartMic:
 
         speech_ended_at = time.time()
         raw = b"".join(speech_buf)
-        print("🔄 Recognising…")
+        if announce:
+            print("🔄 Recognising…")
 
         # Prefer local low-latency STT if available.
         if self._local_enabled:
             text = self._decode_local(raw, partial=False)
-            print(f'📝 You said: "{text}"')
+            if show_transcript:
+                print(f'📝 You said: "{text}"')
             if text:
                 self.last_capture_info = {
                     "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
@@ -372,7 +398,8 @@ class SmartMic:
 
         text = self._decode_google(raw)
         if text:
-            print(f'📝 You said: "{text}"')
+            if show_transcript:
+                print(f'📝 You said: "{text}"')
         self.last_capture_info = {
             "cue_to_speech_start_ms": int(((speech_started_at or speech_ended_at) - started_at) * 1000),
             "speech_end_to_transcript_ms": int((time.time() - speech_ended_at) * 1000),
@@ -654,12 +681,36 @@ class WakeWordEngine:
 class STTPhraseWakeWordEngine(WakeWordEngine):
     def __init__(self, mic: "SmartMic"):
         self._mic = mic
+        self._last_hit_monotonic = 0.0
+
+    def _match_wake_phrase(self, heard: str) -> bool:
+        cleaned = re.sub(r"[^a-zA-Z\s]", " ", heard).lower()
+        words = [w for w in cleaned.split() if w]
+        if not words or len(words) > WAKEWORD_MAX_WORDS:
+            return False
+        phrase = " ".join(words)
+        return phrase in {"jarvis", "hey jarvis", "hello jarvis", "yo jarvis"}
 
     def wait_for_wake(self) -> bool:
-        heard = self._mic.listen(max_record_seconds=4, startup_timeout_s=4)
+        if _recent_tts_activity(WAKEWORD_TTS_GUARD_MS):
+            time.sleep(0.1)
+            return False
+        heard = self._mic.listen(
+            max_record_seconds=4,
+            startup_timeout_s=4,
+            announce=False,
+            show_partials=False,
+            show_transcript=False,
+        )
         if not heard:
             return False
-        return bool(re.search(r"\b(jarvis|hey jarvis|hello jarvis|yo jarvis)\b", heard.lower()))
+        if not self._match_wake_phrase(heard):
+            return False
+        now = time.monotonic()
+        if ((now - self._last_hit_monotonic) * 1000.0) < float(WAKEWORD_MIN_INTERVAL_MS):
+            return False
+        self._last_hit_monotonic = now
+        return True
 
 
 class OpenWakeWordEngine(WakeWordEngine):
@@ -1632,6 +1683,8 @@ def _classify(text: str) -> str:
     rule_match = _classify_by_rules(text)
     if rule_match is not None:
         return rule_match
+    if CLASSIFIER_MODE != "llm":
+        return "QUESTION"
 
     if not _ollama_alive():
         return "QUESTION"
@@ -1664,6 +1717,21 @@ def _truth_policy_guard(text: str) -> str | None:
     return None
 
 
+def _quick_truth_response(text: str) -> str | None:
+    q = text.lower().strip()
+    if not q:
+        return "I didn't catch that."
+    if re.search(r"\b(how are you|how you doing)\b", q):
+        return "Ready and listening."
+    if re.search(r"\b(thank you|thanks)\b", q):
+        return "You're welcome."
+    if re.search(r"\b(what can you do|help me|help)\b", q):
+        return "I can handle battery, volume, now playing, wifi, time, active app, translate, and safe file actions."
+    if re.search(r"\b(are you there|can you hear me)\b", q):
+        return "I'm here."
+    return None
+
+
 # ─────────────────────────────────────────────
 # ROUTER
 # ─────────────────────────────────────────────
@@ -1679,6 +1747,9 @@ def route(text: str) -> str:
     deterministic = _deterministic_intent_layer(text)
     if deterministic is not None:
         return deterministic
+    quick = _quick_truth_response(text)
+    if quick is not None:
+        return quick
 
     intent = _classify(text)
     print(f"🧠 Intent: {intent}")
