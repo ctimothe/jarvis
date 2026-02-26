@@ -137,6 +137,7 @@ def test_build_battery_request(jarvis):
         ("am i on wifi", "ACTION_WIFI_STATUS"),
         ("what time is it", "ACTION_TIME_STATUS"),
         ("what app is active", "ACTION_ACTIVE_APP"),
+        ("what is the active at this currently running", "ACTION_ACTIVE_APP"),
         ('translate "hello" to spanish', "ACTION_TRANSLATE_TEXT"),
     ],
 )
@@ -242,6 +243,7 @@ def test_classify_battery_as_shell(jarvis):
 def test_classify_new_status_queries_as_shell(jarvis):
     assert jarvis._classify("what song is currently playing") == "SHELL"
     assert jarvis._classify("what app is active") == "SHELL"
+    assert jarvis._classify("which app is running right now") == "SHELL"
     assert jarvis._classify("translate hello to spanish") == "SHELL"
 
 
