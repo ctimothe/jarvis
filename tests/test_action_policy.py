@@ -218,3 +218,23 @@ def test_classify_battery_as_shell(jarvis):
 def test_classify_pause_music_as_music(jarvis):
     intent = jarvis._classify("pause the music")
     assert intent == "MUSIC"
+
+
+def test_route_structured_query_bypasses_classifier(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "_classify", lambda _text: "MUSIC")
+    monkeypatch.setattr(jarvis, "handle_shell", lambda _text: "shell handled")
+
+    response = jarvis.route("what is the percentage of my battery health")
+
+    assert response == "shell handled"
+
+
+def test_extract_battery_summary(jarvis):
+    pmset_output = "Now drawing from 'Battery Power'\\n -InternalBattery-0\\t81%; discharging; 4:10 remaining present: true\\n"
+    profiler_output = "Cycle Count: 120\\nCondition: Normal\\nMaximum Capacity: 92%\\n"
+
+    summary = jarvis._extract_battery_summary(pmset_output, profiler_output)
+
+    assert "81 percent" in summary
+    assert "maximum capacity 92 percent" in summary
+    assert "cycle count 120" in summary

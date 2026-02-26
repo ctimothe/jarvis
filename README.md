@@ -18,3 +18,7 @@ Mission mode example:
 Battery example:
 - Say: `what is the percentage of my battery health`
 - Jarvis routes to shell status and speaks charge + health summary.
+
+Latency tuning:
+- Default listen cue is a short beep (faster than spoken "Listening").
+- Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.

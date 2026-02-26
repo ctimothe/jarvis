@@ -41,6 +41,7 @@ except ImportError as e:
 OLLAMA_URL        = "http://localhost:11434"
 MODEL             = "llama3.1:8b"
 HOME              = os.path.expanduser("~")
+LISTEN_CUE_MODE   = os.getenv("JARVIS_LISTEN_CUE", "beep").strip().lower()
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -133,7 +134,9 @@ def _chat(system: str, user: str, temperature: float = 0.3,
 def ask_ai(prompt: str) -> str:
     """General Q&A. Strictly forbidden from pretending to perform computer actions."""
     if not _ollama_alive():
-        return "The AI is offline. Make sure Ollama is running."
+        _start_ollama()
+        if not _ollama_alive():
+            return "The AI is offline. Make sure Ollama is running."
     return _chat(
         system=(
             "You are J.A.R.V.I.S., a voice assistant. "
@@ -157,6 +160,16 @@ def _osascript(script: str) -> str:
     result = subprocess.run(["osascript", "-e", script],
                             capture_output=True, text=True)
     return result.stdout.strip()
+
+
+def _play_listen_cue():
+    if LISTEN_CUE_MODE == "none":
+        return
+    if LISTEN_CUE_MODE == "speech":
+        speak("Listening.", wait=True)
+        return
+    # default: short system beep for minimal activation latency.
+    subprocess.run(["osascript", "-e", "beep 1"], capture_output=True)
 
 
 # ─────────────────────────────────────────────
@@ -1187,6 +1200,12 @@ def route(text: str) -> str:
     pending_control = _handle_pending_mission_control(text)
     if pending_control is not None:
         return pending_control
+
+    # Route structured actions directly to the shell handler to avoid intent
+    # misclassification for command-like phrasing.
+    if _build_mission_plan(text) is not None or _build_action_request(text) is not None:
+        return handle_shell(text)
+
     intent = _classify(text)
     print(f"🧠 Intent: {intent}")
 
@@ -1257,8 +1276,8 @@ class Jarvis:
         def _run():
             try:
                 stop_speaking()
-                speak("Listening.", wait=True)  # finish speaking BEFORE mic opens
-                time.sleep(0.15)                # let reverb die
+                _play_listen_cue()
+                time.sleep(0.05)
                 if not self._smart_mic:
                     speak("Microphone unavailable.")
                     return
