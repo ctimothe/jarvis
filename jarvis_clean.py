@@ -440,6 +440,13 @@ class ActionJob:
     result: ActionResult | None = None
 
 
+@dataclass
+class MissionPlan:
+    mission_id: str
+    requests: list[ActionRequest]
+    created_at: float = field(default_factory=time.time)
+
+
 class FixedWindowRateLimiter:
     def __init__(self, max_per_minute: int):
         self.max_per_minute = max_per_minute
@@ -464,6 +471,9 @@ _action_queue: queue.Queue[ActionJob] = queue.Queue(maxsize=128)
 _queue_worker_started = False
 _queue_lock = threading.Lock()
 _failure_streak = 0
+_pending_mission: MissionPlan | None = None
+_pending_mission_lock = threading.Lock()
+_last_mission_report = "No mission has run yet."
 
 
 def _ensure_audit_dir():
@@ -610,13 +620,100 @@ def _build_action_request(query: str) -> ActionRequest | None:
     return None
 
 
-def _policy_check(request: ActionRequest) -> PolicyDecision:
+def _shorten(text: str, limit: int = 64) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _describe_action_request(request: ActionRequest) -> str:
+    action = request.action
+    args = request.args
+    if action == ACTION_CREATE_FOLDER:
+        return f"create folder {_shorten(args.get('path', ''))}"
+    if action == ACTION_CREATE_FILE:
+        return f"create file {_shorten(args.get('path', ''))}"
+    if action == ACTION_LIST_PATH:
+        return f"list {_shorten(args.get('path', ''))}"
+    if action == ACTION_FIND_NAME:
+        pattern = args.get("pattern", "")
+        return f"find {pattern} in {_shorten(args.get('path', ''))}"
+    if action == ACTION_MOVE_PATH:
+        return f"move {_shorten(args.get('src', ''))} to {_shorten(args.get('dst', ''))}"
+    if action == ACTION_COPY_PATH:
+        return f"copy {_shorten(args.get('src', ''))} to {_shorten(args.get('dst', ''))}"
+    if action == ACTION_RENAME_PATH:
+        return f"rename {_shorten(args.get('src', ''))} to {_shorten(args.get('dst', ''))}"
+    if action == ACTION_DELETE_PATH:
+        return f"delete {_shorten(args.get('path', ''))}"
+    if action == ACTION_DISK_USAGE:
+        return "check disk usage"
+    if action == ACTION_GIT_STATUS:
+        return f"git status in {_shorten(args.get('repo', ''))}"
+    return action
+
+
+def _split_mission_query(query: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", query.strip())
+    if not normalized:
+        return []
+    parts = re.split(r"\s*(?:,?\s+and\s+then\s+|,?\s+then\s+|;\s*|->)\s*", normalized, flags=re.IGNORECASE)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _build_mission_plan(query: str) -> MissionPlan | None:
+    parts = _split_mission_query(query)
+    if len(parts) < 2:
+        return None
+
+    requests: list[ActionRequest] = []
+    for idx, part in enumerate(parts, start=1):
+        request = _build_action_request(part)
+        if not request:
+            return None
+        request.reason = f"{query.strip()} [step {idx}]"
+        requests.append(request)
+
+    return MissionPlan(mission_id=str(uuid.uuid4()), requests=requests)
+
+
+def _peek_pending_mission() -> MissionPlan | None:
+    with _pending_mission_lock:
+        return _pending_mission
+
+
+def _set_pending_mission(plan: MissionPlan) -> None:
+    global _pending_mission
+    with _pending_mission_lock:
+        _pending_mission = plan
+
+
+def _clear_pending_mission() -> MissionPlan | None:
+    global _pending_mission
+    with _pending_mission_lock:
+        plan = _pending_mission
+        _pending_mission = None
+    return plan
+
+
+def _is_mission_execute_command(text: str) -> bool:
+    lower = text.lower()
+    return bool(re.search(r"\b(yes|execute mission|run mission|run it|proceed|do it)\b", lower))
+
+
+def _is_mission_cancel_command(text: str) -> bool:
+    lower = text.lower()
+    return bool(re.search(r"\b(no|cancel mission|abort mission|stop mission)\b", lower))
+
+
+def _policy_check(request: ActionRequest, *, consume_rate_limit: bool = True) -> PolicyDecision:
     if request.action not in SUPPORTED_ACTIONS:
         return PolicyDecision(False, "unsupported action")
 
-    allowed, retry_after = _rate_limiter.allow(request.principal)
-    if not allowed:
-        return PolicyDecision(False, f"rate limit exceeded; retry in {retry_after}s")
+    if consume_rate_limit:
+        allowed, retry_after = _rate_limiter.allow(request.principal)
+        if not allowed:
+            return PolicyDecision(False, f"rate limit exceeded; retry in {retry_after}s")
 
     check_paths: list[str] = []
     for key in ("path", "src", "dst", "repo"):
@@ -761,6 +858,132 @@ def _ensure_action_worker():
         _queue_worker_started = True
 
 
+def _dispatch_action_job(request: ActionRequest) -> tuple[bool, ActionResult | None, str]:
+    try:
+        job = ActionJob(request=request)
+        _action_queue.put(job, timeout=2)
+    except queue.Full:
+        return False, None, "System is busy. Please try again in a few seconds."
+
+    wait_timeout = ACTION_TIMEOUT_SECONDS * (ACTION_MAX_RETRIES + 1) + 3
+    completed = job.done.wait(timeout=wait_timeout)
+    if not completed or not job.result:
+        _audit("action_timeout", request, message="queue wait timeout")
+        return False, None, "The action timed out before completion."
+    return True, job.result, ""
+
+
+def _preview_mission(plan: MissionPlan) -> str:
+    for idx, request in enumerate(plan.requests, start=1):
+        decision = _policy_check(request, consume_rate_limit=False)
+        if not decision.allowed:
+            return f"Mission blocked at step {idx}: {decision.reason}."
+
+    _set_pending_mission(plan)
+    preview_parts = [_describe_action_request(request) for request in plan.requests[:4]]
+    preview = "; ".join(preview_parts)
+    if len(plan.requests) > 4:
+        preview += f"; plus {len(plan.requests) - 4} more step(s)"
+
+    destructive_steps = sum(1 for request in plan.requests if request.action in DESTRUCTIVE_ACTIONS)
+    note = ""
+    if destructive_steps:
+        note = " Destructive steps will still require spoken approval."
+
+    return (
+        f"Mission ready with {len(plan.requests)} steps: {preview}. "
+        "Say execute mission to run it, or cancel mission."
+        + note
+    )
+
+
+def _execute_mission_plan(plan: MissionPlan) -> str:
+    global _last_mission_report
+    success_count = 0
+    failure_count = 0
+    report_lines: list[str] = []
+
+    for idx, request in enumerate(plan.requests, start=1):
+        decision = _policy_check(request)
+        _audit("action_requested", request, decision=decision, message=f"mission_id={plan.mission_id};step={idx}")
+
+        if not decision.allowed:
+            failure_count += 1
+            report_lines.append(f"Step {idx}: blocked ({decision.reason})")
+            continue
+
+        if decision.requires_approval and not _confirm_destructive_action(request):
+            failure_count += 1
+            _audit(
+                "action_cancelled",
+                request,
+                decision=decision,
+                message=f"mission_id={plan.mission_id};step={idx};destructive approval denied",
+            )
+            report_lines.append(f"Step {idx}: cancelled by approval gate")
+            continue
+
+        dispatched, result, dispatch_message = _dispatch_action_job(request)
+        if not dispatched or not result:
+            failure_count += 1
+            report_lines.append(f"Step {idx}: failed ({dispatch_message})")
+            continue
+
+        if result.ok:
+            success_count += 1
+            report_lines.append(f"Step {idx}: ok ({_describe_action_request(request)})")
+        else:
+            failure_count += 1
+            brief = (result.stderr or "unknown error")[:120]
+            report_lines.append(f"Step {idx}: failed ({brief})")
+
+    _append_jsonl(
+        AUDIT_FILE,
+        {
+            "ts": time.time(),
+            "event": "mission_executed",
+            "mission_id": plan.mission_id,
+            "steps_total": len(plan.requests),
+            "steps_ok": success_count,
+            "steps_failed": failure_count,
+        },
+    )
+
+    _last_mission_report = "Mission report. " + " ".join(report_lines[:8])
+
+    if failure_count == 0:
+        return f"Mission complete. All {success_count} steps succeeded."
+    return (
+        f"Mission complete with issues. {success_count} succeeded and {failure_count} failed. "
+        "Say mission report for step details."
+    )
+
+
+def _handle_pending_mission_control(query: str) -> str | None:
+    plan = _peek_pending_mission()
+    if not plan:
+        return None
+
+    lower = query.lower().strip()
+    if _is_mission_cancel_command(lower):
+        _clear_pending_mission()
+        return "Mission cancelled."
+
+    if _is_mission_execute_command(lower):
+        to_run = _clear_pending_mission()
+        if not to_run:
+            return "No pending mission."
+        return _execute_mission_plan(to_run)
+
+    if re.search(r"\bmission status\b", lower):
+        return f"A mission with {len(plan.requests)} steps is pending. Say execute mission or cancel mission."
+
+    if re.search(r"\bmission report\b", lower):
+        return _last_mission_report
+
+    return None
+
+
 def _confirm_destructive_action(request: ActionRequest) -> bool:
     path = request.args.get("path", "")
     label = path if len(path) <= 80 else path[:77] + "..."
@@ -773,6 +996,17 @@ def _confirm_destructive_action(request: ActionRequest) -> bool:
 def handle_shell(query: str) -> str:
     """Typed action execution path with policy checks, queueing, retries, audit, and approval gates."""
     _ensure_action_worker()
+    pending_control = _handle_pending_mission_control(query)
+    if pending_control is not None:
+        return pending_control
+
+    if re.search(r"\bmission report\b", query.lower()):
+        return _last_mission_report
+
+    mission_plan = _build_mission_plan(query)
+    if mission_plan:
+        return _preview_mission(mission_plan)
+
     request = _build_action_request(query)
     if not request:
         return "I can only run structured actions like create, list, find, move, copy, delete, disk usage, or git status."
@@ -787,19 +1021,10 @@ def handle_shell(query: str) -> str:
         _audit("action_cancelled", request, decision=decision, message="destructive approval denied")
         return "Cancelled."
 
-    try:
-        job = ActionJob(request=request)
-        _action_queue.put(job, timeout=2)
-    except queue.Full:
-        return "System is busy. Please try again in a few seconds."
-
-    wait_timeout = ACTION_TIMEOUT_SECONDS * (ACTION_MAX_RETRIES + 1) + 3
-    completed = job.done.wait(timeout=wait_timeout)
-    if not completed or not job.result:
-        _audit("action_timeout", request, message="queue wait timeout")
-        return "The action timed out before completion."
-
-    return _format_action_result(job.result)
+    dispatched, result, dispatch_message = _dispatch_action_job(request)
+    if not dispatched or not result:
+        return dispatch_message
+    return _format_action_result(result)
 
 
 # ─────────────────────────────────────────────
@@ -854,6 +1079,9 @@ def _classify(text: str) -> str:
 def route(text: str) -> str:
     if not text.strip():
         return "I didn't catch that."
+    pending_control = _handle_pending_mission_control(text)
+    if pending_control is not None:
+        return pending_control
     intent = _classify(text)
     print(f"🧠 Intent: {intent}")
 
@@ -990,4 +1218,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

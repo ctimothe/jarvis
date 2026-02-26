@@ -10,6 +10,11 @@
 - Start: `bash workmode.sh`
 - Stop: `bash stopwork.sh`
 - Reset local task-runner state/logs: `bash scripts/reset_state.sh`
+- Mission mode voice controls:
+  - Build plan with connectors: `then`, `and then`, `;`, `->`
+  - Execute pending plan: `execute mission`
+  - Cancel pending plan: `cancel mission`
+  - Get last summary: `mission report`
 
 ## Audit and metrics
 - Audit trail: `~/.jarvis_audit/audit.jsonl`

@@ -100,6 +100,8 @@ def jarvis(monkeypatch):
 
     monkeypatch.setattr(module, "HOME", "/Users/tester")
     monkeypatch.setattr(module, "_rate_limiter", module.FixedWindowRateLimiter(max_per_minute=9999))
+    monkeypatch.setattr(module, "_pending_mission", None)
+    monkeypatch.setattr(module, "_last_mission_report", "No mission has run yet.")
     return module
 
 
@@ -160,3 +162,37 @@ def test_policy_requires_approval_for_delete(jarvis):
 
     assert decision.allowed is True
     assert decision.requires_approval is True
+
+
+def test_build_mission_plan(jarvis):
+    plan = jarvis._build_mission_plan("create folder called wow then create file called wow/notes.txt")
+
+    assert plan is not None
+    assert len(plan.requests) == 2
+    assert plan.requests[0].action == jarvis.ACTION_CREATE_FOLDER
+    assert plan.requests[0].args["path"] == "/Users/tester/wow"
+    assert plan.requests[1].action == jarvis.ACTION_CREATE_FILE
+    assert plan.requests[1].args["path"] == "/Users/tester/wow/notes.txt"
+
+
+def test_pending_mission_execute_control(jarvis, monkeypatch):
+    plan = jarvis._build_mission_plan("create folder called wow then list wow")
+    assert plan is not None
+    jarvis._set_pending_mission(plan)
+    monkeypatch.setattr(jarvis, "_execute_mission_plan", lambda _plan: "mission executed")
+
+    response = jarvis._handle_pending_mission_control("execute mission")
+
+    assert response == "mission executed"
+    assert jarvis._peek_pending_mission() is None
+
+
+def test_pending_mission_cancel_control(jarvis):
+    plan = jarvis._build_mission_plan("create folder called wow then list wow")
+    assert plan is not None
+    jarvis._set_pending_mission(plan)
+
+    response = jarvis._handle_pending_mission_control("cancel mission")
+
+    assert response == "Mission cancelled."
+    assert jarvis._peek_pending_mission() is None
