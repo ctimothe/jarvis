@@ -134,6 +134,7 @@ def test_build_battery_request(jarvis):
     [
         ("what is my volume level", "ACTION_VOLUME_STATUS"),
         ("what song is playing", "ACTION_NOW_PLAYING"),
+        ("what's currently being played", "ACTION_NOW_PLAYING"),
         ("am i on wifi", "ACTION_WIFI_STATUS"),
         ("what time is it", "ACTION_TIME_STATUS"),
         ("what app is active", "ACTION_ACTIVE_APP"),
@@ -242,6 +243,7 @@ def test_classify_battery_as_shell(jarvis):
 
 def test_classify_new_status_queries_as_shell(jarvis):
     assert jarvis._classify("what song is currently playing") == "SHELL"
+    assert jarvis._classify("what's currently being played") == "SHELL"
     assert jarvis._classify("what app is active") == "SHELL"
     assert jarvis._classify("which app is running right now") == "SHELL"
     assert jarvis._classify("translate hello to spanish") == "SHELL"
@@ -373,6 +375,15 @@ def test_classify_rules_mode_skips_llm(jarvis, monkeypatch):
 def test_route_quick_truth_response(jarvis):
     response = jarvis.route("how are you jarvis")
     assert response == "Ready and listening."
+
+
+def test_route_question_rules_mode_stays_local(jarvis, monkeypatch):
+    monkeypatch.setattr(jarvis, "CLASSIFIER_MODE", "rules")
+    monkeypatch.setattr(jarvis, "RESPONSE_STYLE", "truth_concise")
+    monkeypatch.setattr(jarvis, "_classify", lambda _text: "QUESTION")
+    monkeypatch.setattr(jarvis, "ask_ai", lambda _text: (_ for _ in ()).throw(RuntimeError("ask_ai should not run")))
+    response = jarvis.route("what exactly can you do")
+    assert "Ask a direct command" in response
 
 
 def test_stt_wakeword_phrase_is_strict(jarvis):
