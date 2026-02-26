@@ -21,7 +21,21 @@
   - `export JARVIS_STT_BACKEND=local` for local Whisper
   - `export JARVIS_LOCAL_STT_MODEL=tiny.en` (`base.en` for better accuracy)
   - `export JARVIS_SILENCE_END_MS=300` for faster turn-taking
+  - `export JARVIS_VAD_PROFILE=fast|balanced|robust` for capture stability/speed
   - `export JARVIS_INSTALL_LOCAL_STT=1` before `bash workmode.sh` to install local Whisper deps
+  - `export JARVIS_TRIGGER_MODE=hotkey|wake|hybrid` (default `hybrid`)
+  - `export JARVIS_WAKEWORD_BACKEND=stt_phrase|openwakeword`
+  - `export JARVIS_RESPONSE_STYLE=truth_concise|balanced`
+  - `export JARVIS_TRANSLATION_DEFAULT_TARGET=spanish`
+
+## Deterministic local commands
+- Battery: `is my laptop charging`, `battery health`
+- Volume: `what is my volume level`
+- Media: `what song is playing`
+- Network: `am i on wifi`
+- Time/date: `what time is it`, `date today`
+- Active app: `what app is active`
+- Translation: `translate "hello" to spanish`, `say this in french: hello`
 
 ## Shell startup issue
 - If you see `command not found: compdef`, add this near the top of your `~/.zshrc`:
