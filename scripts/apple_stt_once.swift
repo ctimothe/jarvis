@@ -6,12 +6,20 @@ struct CLIArgs {
     let maxSeconds: TimeInterval
     let startupTimeout: TimeInterval
     let language: String
+    let silenceEndMs: Int
+    let minSpeechMs: Int
+    let energyFloor: Float
+    let energyMultiplier: Float
     let daemon: Bool
 
     static func parse() -> CLIArgs {
         var maxSeconds: TimeInterval = 8
         var startupTimeout: TimeInterval = 4
         var language = "en-US"
+        var silenceEndMs = 420
+        var minSpeechMs = 170
+        var energyFloor: Float = 0.010
+        var energyMultiplier: Float = 2.0
         var daemon = false
 
         var index = 1
@@ -33,6 +41,26 @@ struct CLIArgs {
                 index += 2
                 continue
             }
+            if arg == "--silence-end-ms", index + 1 < argv.count {
+                silenceEndMs = Int(argv[index + 1]) ?? silenceEndMs
+                index += 2
+                continue
+            }
+            if arg == "--min-speech-ms", index + 1 < argv.count {
+                minSpeechMs = Int(argv[index + 1]) ?? minSpeechMs
+                index += 2
+                continue
+            }
+            if arg == "--energy-floor", index + 1 < argv.count {
+                energyFloor = Float(argv[index + 1]) ?? energyFloor
+                index += 2
+                continue
+            }
+            if arg == "--energy-multiplier", index + 1 < argv.count {
+                energyMultiplier = Float(argv[index + 1]) ?? energyMultiplier
+                index += 2
+                continue
+            }
             if arg == "--daemon" {
                 daemon = true
                 index += 1
@@ -44,8 +72,28 @@ struct CLIArgs {
             maxSeconds: max(1, maxSeconds),
             startupTimeout: max(1, startupTimeout),
             language: language,
+            silenceEndMs: max(80, silenceEndMs),
+            minSpeechMs: max(60, minSpeechMs),
+            energyFloor: max(0.001, energyFloor),
+            energyMultiplier: max(1.1, energyMultiplier),
             daemon: daemon
         )
+    }
+
+    private static func parseDouble(_ value: Any?, default fallback: Double) -> Double {
+        if let v = value as? Double { return v }
+        if let v = value as? Float { return Double(v) }
+        if let v = value as? Int { return Double(v) }
+        if let v = value as? NSNumber { return v.doubleValue }
+        return fallback
+    }
+
+    private static func parseInt(_ value: Any?, default fallback: Int) -> Int {
+        if let v = value as? Int { return v }
+        if let v = value as? Double { return Int(v) }
+        if let v = value as? Float { return Int(v) }
+        if let v = value as? NSNumber { return v.intValue }
+        return fallback
     }
 
     static func fromRequestJSON(_ line: String, defaults: CLIArgs) -> CLIArgs {
@@ -56,14 +104,22 @@ struct CLIArgs {
             return defaults
         }
 
-        let maxSeconds = (dict["max_seconds"] as? Double) ?? (dict["max_seconds"] as? NSNumber)?.doubleValue ?? defaults.maxSeconds
-        let startupTimeout = (dict["startup_timeout"] as? Double) ?? (dict["startup_timeout"] as? NSNumber)?.doubleValue ?? defaults.startupTimeout
+        let maxSeconds = parseDouble(dict["max_seconds"], default: defaults.maxSeconds)
+        let startupTimeout = parseDouble(dict["startup_timeout"], default: defaults.startupTimeout)
         let language = (dict["language"] as? String) ?? defaults.language
+        let silenceEndMs = parseInt(dict["silence_end_ms"], default: defaults.silenceEndMs)
+        let minSpeechMs = parseInt(dict["min_speech_ms"], default: defaults.minSpeechMs)
+        let energyFloor = Float(parseDouble(dict["energy_floor"], default: Double(defaults.energyFloor)))
+        let energyMultiplier = Float(parseDouble(dict["energy_multiplier"], default: Double(defaults.energyMultiplier)))
 
         return CLIArgs(
             maxSeconds: max(1, maxSeconds),
             startupTimeout: max(1, startupTimeout),
             language: language,
+            silenceEndMs: max(80, silenceEndMs),
+            minSpeechMs: max(60, minSpeechMs),
+            energyFloor: max(0.001, energyFloor),
+            energyMultiplier: max(1.1, energyMultiplier),
             daemon: defaults.daemon
         )
     }
@@ -118,7 +174,9 @@ final class AppleSpeechOneShot {
     private var finishError: String?
     private var isFinished = false
     private let finishLock = NSLock()
+    private let stateLock = NSLock()
     private let done = DispatchSemaphore(value: 0)
+    private var adaptiveNoiseFloor: Float = 0.003
 
     private let audioEngine = AVAudioEngine()
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -152,7 +210,9 @@ final class AppleSpeechOneShot {
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.recognitionRequest?.append(buffer)
+            guard let self else { return }
+            self.recognitionRequest?.append(buffer)
+            self.trackAudioEnergy(buffer: buffer, now: Date())
         }
 
         do {
@@ -167,11 +227,7 @@ final class AppleSpeechOneShot {
             if let result {
                 let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !transcript.isEmpty {
-                    self.lastTranscript = transcript
-                    if self.firstSpeechAt == nil {
-                        self.firstSpeechAt = Date()
-                    }
-                    self.lastSpeechAt = Date()
+                    self.recordTranscriptActivity(transcript, now: Date())
                 }
                 if result.isFinal {
                     self.finish()
@@ -183,20 +239,48 @@ final class AppleSpeechOneShot {
             }
         }
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + args.startupTimeout) { [weak self] in
-            guard let self else { return }
-            if self.firstSpeechAt == nil {
-                self.finish()
+        let hardDeadline = Date().addingTimeInterval(args.maxSeconds + 3)
+        while Date() < hardDeadline {
+            if done.wait(timeout: .now() + 0.05) == .success {
+                break
+            }
+
+            let now = Date()
+            let elapsedMs = Int(now.timeIntervalSince(startDate) * 1000)
+            let (first, last) = speechTimes()
+
+            if let first {
+                let speechMs = Int(now.timeIntervalSince(first) * 1000)
+                let lastSignal = last ?? first
+                let silenceMs = Int(now.timeIntervalSince(lastSignal) * 1000)
+                if speechMs >= args.minSpeechMs && silenceMs >= args.silenceEndMs {
+                    finish()
+                    continue
+                }
+            } else if elapsedMs >= Int(args.startupTimeout * 1000) {
+                finish()
+                continue
+            }
+
+            if elapsedMs >= Int(args.maxSeconds * 1000) {
+                finish()
+                continue
             }
         }
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + args.maxSeconds) { [weak self] in
-            self?.finish()
+        if !isDone() {
+            finish(error: "recognition watchdog timeout")
         }
-
-        _ = done.wait(timeout: .now() + args.maxSeconds + 3)
+        _ = done.wait(timeout: .now() + 0.2)
         cleanupAudio()
         return output(error: finishError)
+    }
+
+    private func isDone() -> Bool {
+        finishLock.lock()
+        let value = isFinished
+        finishLock.unlock()
+        return value
     }
 
     private func finish(error: String? = nil) {
@@ -213,6 +297,55 @@ final class AppleSpeechOneShot {
         done.signal()
     }
 
+    private func speechTimes() -> (Date?, Date?) {
+        stateLock.lock()
+        let first = firstSpeechAt
+        let last = lastSpeechAt
+        stateLock.unlock()
+        return (first, last)
+    }
+
+    private func recordTranscriptActivity(_ transcript: String, now: Date) {
+        stateLock.lock()
+        lastTranscript = transcript
+        if firstSpeechAt == nil {
+            firstSpeechAt = now
+        }
+        lastSpeechAt = now
+        stateLock.unlock()
+    }
+
+    private func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData?[0] else { return 0.0 }
+        let frameLength = Int(buffer.frameLength)
+        if frameLength <= 0 { return 0.0 }
+        var sum: Float = 0.0
+        for i in 0..<frameLength {
+            let sample = channelData[i]
+            sum += sample * sample
+        }
+        return sqrt(sum / Float(frameLength))
+    }
+
+    private func trackAudioEnergy(buffer: AVAudioPCMBuffer, now: Date) {
+        let rms = computeRMS(buffer)
+        if rms <= 0.0001 {
+            return
+        }
+        stateLock.lock()
+        if firstSpeechAt == nil {
+            adaptiveNoiseFloor = (adaptiveNoiseFloor * 0.97) + (rms * 0.03)
+        }
+        let threshold = max(args.energyFloor, adaptiveNoiseFloor * args.energyMultiplier)
+        if rms >= threshold {
+            if firstSpeechAt == nil {
+                firstSpeechAt = now
+            }
+            lastSpeechAt = now
+        }
+        stateLock.unlock()
+    }
+
     private func cleanupAudio() {
         if audioEngine.isRunning {
             audioEngine.stop()
@@ -225,18 +358,23 @@ final class AppleSpeechOneShot {
 
     private func output(error: String?) -> STTOutput {
         let now = Date()
+        stateLock.lock()
+        let first = firstSpeechAt
+        let last = lastSpeechAt
+        let text = lastTranscript
+        stateLock.unlock()
+
         let totalMs = Int(now.timeIntervalSince(startDate) * 1000)
-        let firstMs = firstSpeechAt.map { Int($0.timeIntervalSince(startDate) * 1000) }
+        let firstMs = first.map { Int($0.timeIntervalSince(startDate) * 1000) }
         var speechDurationMs: Int?
         var speechEndToTranscriptMs: Int?
-
-        if let first = firstSpeechAt, let last = lastSpeechAt {
+        if let first, let last {
             speechDurationMs = Int(last.timeIntervalSince(first) * 1000)
             speechEndToTranscriptMs = Int(now.timeIntervalSince(last) * 1000)
         }
 
         return STTOutput(
-            text: lastTranscript,
+            text: text,
             firstSpeechMs: firstMs,
             speechDurationMs: speechDurationMs,
             speechEndToTranscriptMs: speechEndToTranscriptMs,

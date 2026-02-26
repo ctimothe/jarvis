@@ -66,6 +66,10 @@ WAKEWORD_THRESHOLD = float(os.getenv("JARVIS_WAKEWORD_THRESHOLD", "0.55"))
 WAKEWORD_POLL_SECONDS = float(os.getenv("JARVIS_WAKEWORD_POLL_SECONDS", "0.8"))
 APPLE_STT_LANGUAGE = os.getenv("JARVIS_APPLE_STT_LANGUAGE", "en-US").strip()
 APPLE_STT_TIMEOUT_PADDING_S = int(os.getenv("JARVIS_APPLE_STT_TIMEOUT_PADDING_S", "4"))
+APPLE_STT_SILENCE_END_MS = int(os.getenv("JARVIS_APPLE_STT_SILENCE_END_MS", "420"))
+APPLE_STT_MIN_SPEECH_MS = int(os.getenv("JARVIS_APPLE_STT_MIN_SPEECH_MS", "170"))
+APPLE_STT_ENERGY_FLOOR = float(os.getenv("JARVIS_APPLE_STT_ENERGY_FLOOR", "0.010"))
+APPLE_STT_ENERGY_MULTIPLIER = float(os.getenv("JARVIS_APPLE_STT_ENERGY_MULTIPLIER", "2.0"))
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -303,7 +307,20 @@ class SmartMic:
             return
         try:
             self._apple_daemon_proc = subprocess.Popen(
-                [self._apple_stt_binary, "--daemon", "--language", APPLE_STT_LANGUAGE],
+                [
+                    self._apple_stt_binary,
+                    "--daemon",
+                    "--language",
+                    APPLE_STT_LANGUAGE,
+                    "--silence-end-ms",
+                    str(APPLE_STT_SILENCE_END_MS),
+                    "--min-speech-ms",
+                    str(APPLE_STT_MIN_SPEECH_MS),
+                    "--energy-floor",
+                    str(APPLE_STT_ENERGY_FLOOR),
+                    "--energy-multiplier",
+                    str(APPLE_STT_ENERGY_MULTIPLIER),
+                ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -443,6 +460,10 @@ class SmartMic:
                 "max_seconds": max_record_seconds,
                 "startup_timeout": startup_timeout_s,
                 "language": APPLE_STT_LANGUAGE,
+                "silence_end_ms": APPLE_STT_SILENCE_END_MS,
+                "min_speech_ms": APPLE_STT_MIN_SPEECH_MS,
+                "energy_floor": APPLE_STT_ENERGY_FLOOR,
+                "energy_multiplier": APPLE_STT_ENERGY_MULTIPLIER,
             }
             started = time.time()
             try:
@@ -480,6 +501,10 @@ class SmartMic:
             "--max-seconds", str(max_record_seconds),
             "--startup-timeout", str(startup_timeout_s),
             "--language", APPLE_STT_LANGUAGE,
+            "--silence-end-ms", str(APPLE_STT_SILENCE_END_MS),
+            "--min-speech-ms", str(APPLE_STT_MIN_SPEECH_MS),
+            "--energy-floor", str(APPLE_STT_ENERGY_FLOOR),
+            "--energy-multiplier", str(APPLE_STT_ENERGY_MULTIPLIER),
         ]
         started = time.time()
         try:
