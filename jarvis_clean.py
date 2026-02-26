@@ -18,6 +18,7 @@ import uuid
 import queue
 import resource
 import shutil
+import select
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,7 @@ LOCAL_STT_MODEL   = os.getenv("JARVIS_LOCAL_STT_MODEL", "tiny.en").strip()
 LOCAL_STT_COMPUTE = os.getenv("JARVIS_LOCAL_STT_COMPUTE", "int8").strip()
 TRIGGER_MODE      = os.getenv("JARVIS_TRIGGER_MODE", "hotkey").strip().lower()  # hotkey|wake|hybrid
 VAD_PROFILE       = os.getenv("JARVIS_VAD_PROFILE", "fast").strip().lower()  # fast|balanced|robust
-WAKEWORD_BACKEND  = os.getenv("JARVIS_WAKEWORD_BACKEND", "stt_phrase").strip().lower()
+WAKEWORD_BACKEND  = os.getenv("JARVIS_WAKEWORD_BACKEND", "openwakeword").strip().lower()
 TRANSLATION_BACKEND = os.getenv("JARVIS_TRANSLATION_BACKEND", "local").strip().lower()
 TRANSLATION_DEFAULT_TARGET = os.getenv("JARVIS_TRANSLATION_DEFAULT_TARGET", "spanish").strip().lower()
 RESPONSE_STYLE    = os.getenv("JARVIS_RESPONSE_STYLE", "truth_concise").strip().lower()  # truth_concise|balanced
@@ -61,6 +62,8 @@ CLASSIFIER_MODE   = os.getenv("JARVIS_CLASSIFIER_MODE", "rules").strip().lower()
 WAKEWORD_MIN_INTERVAL_MS = int(os.getenv("JARVIS_WAKEWORD_MIN_INTERVAL_MS", "1200"))
 WAKEWORD_TTS_GUARD_MS = int(os.getenv("JARVIS_WAKEWORD_TTS_GUARD_MS", "1800"))
 WAKEWORD_MAX_WORDS = int(os.getenv("JARVIS_WAKEWORD_MAX_WORDS", "4"))
+WAKEWORD_THRESHOLD = float(os.getenv("JARVIS_WAKEWORD_THRESHOLD", "0.55"))
+WAKEWORD_POLL_SECONDS = float(os.getenv("JARVIS_WAKEWORD_POLL_SECONDS", "0.8"))
 APPLE_STT_LANGUAGE = os.getenv("JARVIS_APPLE_STT_LANGUAGE", "en-US").strip()
 APPLE_STT_TIMEOUT_PADDING_S = int(os.getenv("JARVIS_APPLE_STT_TIMEOUT_PADDING_S", "4"))
 
@@ -234,6 +237,8 @@ class SmartMic:
         self._stt_mode = "google"
         self._apple_native_enabled = False
         self._apple_stt_binary: str | None = None
+        self._apple_daemon_proc: subprocess.Popen | None = None
+        self._apple_daemon_lock = threading.Lock()
         self._local_model = None
         self._local_enabled = False
         self._partial_min_frames = max(8, int(LOCAL_STT_PARTIAL_MIN_MS / VAD_FRAME_MS))
@@ -283,8 +288,53 @@ class SmartMic:
         self._apple_stt_binary = binary
         self._apple_native_enabled = True
         self._stt_mode = "apple_native"
-        print("🧠 STT backend: apple_native (on-device)")
+        self._start_apple_stt_daemon()
+        if self._apple_daemon_proc and self._apple_daemon_proc.poll() is None:
+            print("🧠 STT backend: apple_native (on-device, daemon)")
+        else:
+            print("🧠 STT backend: apple_native (on-device)")
         return True
+
+    def _start_apple_stt_daemon(self):
+        if not self._apple_native_enabled or not self._apple_stt_binary:
+            return
+        proc = self._apple_daemon_proc
+        if proc and proc.poll() is None:
+            return
+        try:
+            self._apple_daemon_proc = subprocess.Popen(
+                [self._apple_stt_binary, "--daemon", "--language", APPLE_STT_LANGUAGE],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            if self._apple_daemon_proc.stdin is None or self._apple_daemon_proc.stdout is None:
+                self._stop_apple_stt_daemon()
+        except Exception as exc:
+            print(f"⚠️  Failed to start Apple STT daemon: {exc}")
+            self._apple_daemon_proc = None
+
+    def _stop_apple_stt_daemon(self):
+        proc = self._apple_daemon_proc
+        self._apple_daemon_proc = None
+        if not proc:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.write("quit\n")
+                proc.stdin.flush()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=1)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def _init_local_backend(self, explicit_request: bool) -> bool:
         if np is None:
@@ -341,7 +391,84 @@ class SmartMic:
         self._stt_mode = "google"
         print("🧠 STT backend: google")
 
-    def _decode_apple_native(
+    def _parse_apple_stt_payload(self, payload: str, elapsed_ms: int) -> tuple[str, dict[str, int]]:
+        parsed: dict[str, Any]
+        try:
+            parsed = json.loads(payload.splitlines()[-1])
+        except Exception:
+            return payload, {"speech_end_to_transcript_ms": elapsed_ms}
+
+        if not isinstance(parsed, dict):
+            return "", {"speech_end_to_transcript_ms": elapsed_ms}
+
+        error = str(parsed.get("error", "")).strip()
+        if error:
+            print(f"⚠️  Apple STT: {error}")
+
+        text = str(parsed.get("text", "")).strip()
+        capture: dict[str, int] = {}
+        first_speech_ms = parsed.get("first_speech_ms")
+        if isinstance(first_speech_ms, (int, float)):
+            capture["cue_to_speech_start_ms"] = int(first_speech_ms)
+
+        end_to_text_ms = parsed.get("speech_end_to_transcript_ms")
+        if isinstance(end_to_text_ms, (int, float)):
+            capture["speech_end_to_transcript_ms"] = int(end_to_text_ms)
+        else:
+            recognition_total_ms = parsed.get("recognition_total_ms")
+            if isinstance(recognition_total_ms, (int, float)):
+                capture["speech_end_to_transcript_ms"] = int(recognition_total_ms)
+            else:
+                capture["speech_end_to_transcript_ms"] = elapsed_ms
+
+        speech_duration_ms = parsed.get("speech_duration_ms")
+        if isinstance(speech_duration_ms, (int, float)):
+            capture["speech_duration_ms"] = int(speech_duration_ms)
+
+        return text, capture
+
+    def _decode_apple_native_daemon(
+        self,
+        max_record_seconds: int,
+        startup_timeout_s: int,
+    ) -> tuple[str, dict[str, int]] | None:
+        timeout_s = max_record_seconds + APPLE_STT_TIMEOUT_PADDING_S
+        with self._apple_daemon_lock:
+            self._start_apple_stt_daemon()
+            proc = self._apple_daemon_proc
+            if not proc or proc.poll() is not None or proc.stdin is None or proc.stdout is None:
+                return None
+
+            request = {
+                "max_seconds": max_record_seconds,
+                "startup_timeout": startup_timeout_s,
+                "language": APPLE_STT_LANGUAGE,
+            }
+            started = time.time()
+            try:
+                proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except Exception as exc:
+                print(f"⚠️  Apple STT daemon write failed: {exc}")
+                self._stop_apple_stt_daemon()
+                return None
+
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], timeout_s)
+            except Exception:
+                ready = []
+            elapsed_ms = int((time.time() - started) * 1000)
+            if not ready:
+                print("⚠️  Apple STT daemon timed out. Restarting daemon.")
+                self._stop_apple_stt_daemon()
+                return "", {"speech_end_to_transcript_ms": elapsed_ms}
+
+            line = proc.stdout.readline().strip()
+            if not line:
+                return "", {"speech_end_to_transcript_ms": elapsed_ms}
+            return self._parse_apple_stt_payload(line, elapsed_ms)
+
+    def _decode_apple_native_oneshot(
         self,
         max_record_seconds: int,
         startup_timeout_s: int,
@@ -379,40 +506,17 @@ class SmartMic:
         if not payload:
             return "", {"speech_end_to_transcript_ms": elapsed_ms}
 
-        parsed: dict[str, Any]
-        try:
-            parsed = json.loads(payload.splitlines()[-1])
-        except Exception:
-            return payload, {"speech_end_to_transcript_ms": elapsed_ms}
+        return self._parse_apple_stt_payload(payload, elapsed_ms)
 
-        if not isinstance(parsed, dict):
-            return "", {"speech_end_to_transcript_ms": elapsed_ms}
-
-        error = str(parsed.get("error", "")).strip()
-        if error:
-            print(f"⚠️  Apple STT: {error}")
-
-        text = str(parsed.get("text", "")).strip()
-        capture: dict[str, int] = {}
-        first_speech_ms = parsed.get("first_speech_ms")
-        if isinstance(first_speech_ms, (int, float)):
-            capture["cue_to_speech_start_ms"] = int(first_speech_ms)
-
-        end_to_text_ms = parsed.get("speech_end_to_transcript_ms")
-        if isinstance(end_to_text_ms, (int, float)):
-            capture["speech_end_to_transcript_ms"] = int(end_to_text_ms)
-        else:
-            recognition_total_ms = parsed.get("recognition_total_ms")
-            if isinstance(recognition_total_ms, (int, float)):
-                capture["speech_end_to_transcript_ms"] = int(recognition_total_ms)
-            else:
-                capture["speech_end_to_transcript_ms"] = elapsed_ms
-
-        speech_duration_ms = parsed.get("speech_duration_ms")
-        if isinstance(speech_duration_ms, (int, float)):
-            capture["speech_duration_ms"] = int(speech_duration_ms)
-
-        return text, capture
+    def _decode_apple_native(
+        self,
+        max_record_seconds: int,
+        startup_timeout_s: int,
+    ) -> tuple[str, dict[str, int]]:
+        daemon_result = self._decode_apple_native_daemon(max_record_seconds, startup_timeout_s)
+        if daemon_result is not None:
+            return daemon_result
+        return self._decode_apple_native_oneshot(max_record_seconds, startup_timeout_s)
 
     def _decode_local(self, raw: bytes, partial: bool = False) -> str:
         if not self._local_enabled or self._local_model is None or not raw or np is None:
@@ -576,6 +680,13 @@ class SmartMic:
             "speech_duration_ms": int((speech_ended_at - (speech_started_at or speech_ended_at)) * 1000),
         }
         return text
+
+    def close(self):
+        self._stop_apple_stt_daemon()
+        try:
+            self._pa.terminate()
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
@@ -848,6 +959,9 @@ class WakeWordEngine:
     def wait_for_wake(self) -> bool:
         raise NotImplementedError
 
+    def close(self):
+        return None
+
 
 class STTPhraseWakeWordEngine(WakeWordEngine):
     def __init__(self, mic: "SmartMic"):
@@ -888,20 +1002,91 @@ class OpenWakeWordEngine(WakeWordEngine):
     def __init__(self, fallback: WakeWordEngine):
         self._fallback = fallback
         self._available = False
+        self._last_hit_monotonic = 0.0
+        self._pa: pyaudio.PyAudio | None = None
+        self._stream: Any = None
+        self._model = None
+        self._frame_samples = int(VAD_SAMPLE_RATE * 0.08)  # 80ms
         try:
+            if np is None:
+                raise RuntimeError("numpy unavailable")
             from openwakeword.model import Model  # type: ignore
+
             self._model = Model()
+            self._pa = pyaudio.PyAudio()
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=VAD_SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=self._frame_samples,
+            )
             self._available = True
-        except Exception:
+        except Exception as exc:
+            print(f"⚠️  openWakeWord unavailable: {exc}. Falling back to stt_phrase.")
             self._model = None
 
+    def _score_frame(self, frame: bytes) -> float:
+        if np is None or self._model is None:
+            return 0.0
+        pcm_i16 = np.frombuffer(frame, dtype=np.int16)
+        pcm_f32 = pcm_i16.astype(np.float32) / 32768.0
+
+        score_obj: Any = None
+        try:
+            score_obj = self._model.predict(pcm_f32)
+        except Exception:
+            try:
+                score_obj = self._model.predict(pcm_i16)
+            except Exception:
+                return 0.0
+
+        if isinstance(score_obj, dict):
+            numeric_scores = [float(v) for v in score_obj.values() if isinstance(v, (int, float))]
+            return max(numeric_scores) if numeric_scores else 0.0
+        if isinstance(score_obj, (int, float)):
+            return float(score_obj)
+        return 0.0
+
     def wait_for_wake(self) -> bool:
-        # Fallback path keeps wake-word usable without optional dependency.
+        if _recent_tts_activity(WAKEWORD_TTS_GUARD_MS):
+            time.sleep(0.08)
+            return False
         if not self._available:
             return self._fallback.wait_for_wake()
-        # In v1, use fallback STT phrase even when model exists to avoid adding
-        # a second concurrent audio capture path; openWakeWord path is reserved.
-        return self._fallback.wait_for_wake()
+
+        deadline = time.monotonic() + max(0.2, WAKEWORD_POLL_SECONDS)
+        try:
+            while time.monotonic() < deadline:
+                frame = self._stream.read(self._frame_samples, exception_on_overflow=False)
+                score = self._score_frame(frame)
+                if score >= WAKEWORD_THRESHOLD:
+                    now = time.monotonic()
+                    if ((now - self._last_hit_monotonic) * 1000.0) < float(WAKEWORD_MIN_INTERVAL_MS):
+                        continue
+                    self._last_hit_monotonic = now
+                    return True
+        except Exception as exc:
+            print(f"⚠️  openWakeWord stream failed: {exc}. Switching to stt_phrase.")
+            self.close()
+            self._available = False
+            return self._fallback.wait_for_wake()
+        return False
+
+    def close(self):
+        try:
+            if self._stream is not None:
+                self._stream.stop_stream()
+                self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+        try:
+            if self._pa is not None:
+                self._pa.terminate()
+        except Exception:
+            pass
+        self._pa = None
 
 
 class FixedWindowRateLimiter:
@@ -2069,6 +2254,16 @@ class Jarvis:
 
     def shutdown(self):
         self._stop_event.set()
+        if self._wake_engine:
+            try:
+                self._wake_engine.close()
+            except Exception:
+                pass
+        if self._smart_mic:
+            try:
+                self._smart_mic.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────

@@ -6,11 +6,13 @@ struct CLIArgs {
     let maxSeconds: TimeInterval
     let startupTimeout: TimeInterval
     let language: String
+    let daemon: Bool
 
     static func parse() -> CLIArgs {
         var maxSeconds: TimeInterval = 8
         var startupTimeout: TimeInterval = 4
         var language = "en-US"
+        var daemon = false
 
         var index = 1
         let argv = CommandLine.arguments
@@ -31,9 +33,39 @@ struct CLIArgs {
                 index += 2
                 continue
             }
+            if arg == "--daemon" {
+                daemon = true
+                index += 1
+                continue
+            }
             index += 1
         }
-        return CLIArgs(maxSeconds: max(1, maxSeconds), startupTimeout: max(1, startupTimeout), language: language)
+        return CLIArgs(
+            maxSeconds: max(1, maxSeconds),
+            startupTimeout: max(1, startupTimeout),
+            language: language,
+            daemon: daemon
+        )
+    }
+
+    static func fromRequestJSON(_ line: String, defaults: CLIArgs) -> CLIArgs {
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any]
+        else {
+            return defaults
+        }
+
+        let maxSeconds = (dict["max_seconds"] as? Double) ?? (dict["max_seconds"] as? NSNumber)?.doubleValue ?? defaults.maxSeconds
+        let startupTimeout = (dict["startup_timeout"] as? Double) ?? (dict["startup_timeout"] as? NSNumber)?.doubleValue ?? defaults.startupTimeout
+        let language = (dict["language"] as? String) ?? defaults.language
+
+        return CLIArgs(
+            maxSeconds: max(1, maxSeconds),
+            startupTimeout: max(1, startupTimeout),
+            language: language,
+            daemon: defaults.daemon
+        )
     }
 }
 
@@ -44,6 +76,37 @@ struct STTOutput: Codable {
     let speechEndToTranscriptMs: Int?
     let recognitionTotalMs: Int
     let error: String?
+}
+
+enum SpeechAuthCache {
+    private static var checked = false
+    private static var authorized = false
+    private static let lock = NSLock()
+
+    static func ensureAuthorized() -> Bool {
+        lock.lock()
+        if checked {
+            let value = authorized
+            lock.unlock()
+            return value
+        }
+        lock.unlock()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var status: SFSpeechRecognizerAuthorizationStatus = .notDetermined
+        SFSpeechRecognizer.requestAuthorization { newStatus in
+            status = newStatus
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 6)
+
+        lock.lock()
+        checked = true
+        authorized = (status == .authorized)
+        let value = authorized
+        lock.unlock()
+        return value
+    }
 }
 
 final class AppleSpeechOneShot {
@@ -67,7 +130,7 @@ final class AppleSpeechOneShot {
     }
 
     func run() -> STTOutput {
-        guard authorizeSpeech() else {
+        guard SpeechAuthCache.ensureAuthorized() else {
             return output(error: "Speech permission not authorized.")
         }
 
@@ -136,17 +199,6 @@ final class AppleSpeechOneShot {
         return output(error: finishError)
     }
 
-    private func authorizeSpeech() -> Bool {
-        let semaphore = DispatchSemaphore(value: 0)
-        var status: SFSpeechRecognizerAuthorizationStatus = .notDetermined
-        SFSpeechRecognizer.requestAuthorization { newStatus in
-            status = newStatus
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 6)
-        return status == .authorized
-    }
-
     private func finish(error: String? = nil) {
         finishLock.lock()
         defer { finishLock.unlock() }
@@ -194,12 +246,33 @@ final class AppleSpeechOneShot {
     }
 }
 
+func printResult(_ result: STTOutput) {
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+    if let data = try? encoder.encode(result), let text = String(data: data, encoding: .utf8) {
+        print(text)
+        fflush(stdout)
+    } else {
+        print("{\"text\":\"\",\"recognition_total_ms\":0,\"error\":\"encoding failure\"}")
+        fflush(stdout)
+    }
+}
+
 let args = CLIArgs.parse()
-let runner = AppleSpeechOneShot(args: args)
-let result = runner.run()
-let encoder = JSONEncoder()
-if let data = try? encoder.encode(result), let text = String(data: data, encoding: .utf8) {
-    print(text)
+if args.daemon {
+    while let line = readLine() {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            continue
+        }
+        if trimmed == "quit" || trimmed == "exit" {
+            break
+        }
+        let req = CLIArgs.fromRequestJSON(trimmed, defaults: args)
+        let runner = AppleSpeechOneShot(args: req)
+        printResult(runner.run())
+    }
 } else {
-    print("{\"text\":\"\",\"recognitionTotalMs\":0,\"error\":\"encoding failure\"}")
+    let runner = AppleSpeechOneShot(args: args)
+    printResult(runner.run())
 }
