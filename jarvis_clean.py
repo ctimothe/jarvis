@@ -71,6 +71,7 @@ APPLE_STT_MIN_SPEECH_MS = int(os.getenv("JARVIS_APPLE_STT_MIN_SPEECH_MS", "170")
 APPLE_STT_ENERGY_FLOOR = float(os.getenv("JARVIS_APPLE_STT_ENERGY_FLOOR", "0.010"))
 APPLE_STT_ENERGY_MULTIPLIER = float(os.getenv("JARVIS_APPLE_STT_ENERGY_MULTIPLIER", "2.0"))
 APPLE_STT_BUNDLE_ID = os.getenv("JARVIS_APPLE_STT_BUNDLE_ID", "com.jarvis.speechhelper").strip()
+APPLE_STT_FORCE_HELPER = os.getenv("JARVIS_FORCE_APPLE_HELPER", "0").strip() == "1"
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -322,10 +323,9 @@ class SmartMic:
     def _apple_stt_privacy_guidance(self):
         if self._apple_native_enabled:
             self._apple_native_enabled = False
-            self._stt_mode = "google"
             self._stop_apple_stt_daemon()
         print("⚠️  Apple STT was blocked by macOS privacy (TCC).")
-        print("⚠️  Falling back to Google STT for now.")
+        print("⚠️  Falling back to non-Apple STT for now.")
         print("   Run these commands, then start Jarvis again to re-prompt permissions:")
         print(f"   tccutil reset SpeechRecognition {APPLE_STT_BUNDLE_ID}")
         print(f"   tccutil reset Microphone {APPLE_STT_BUNDLE_ID}")
@@ -333,8 +333,27 @@ class SmartMic:
         print("   tccutil reset Microphone com.apple.Terminal")
         print("   open 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition'")
         print("   open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'")
+        self._fallback_to_best_nonapple_backend()
+
+    def _fallback_to_best_nonapple_backend(self):
+        if self._init_local_backend(explicit_request=False):
+            print("✅ Using local Whisper fallback.")
+            return
+        self._stt_mode = "google"
+        print("🧠 STT backend: google")
 
     def _init_apple_native_backend(self) -> bool:
+        mac_ver = platform.mac_ver()[0].strip()
+        major = 0
+        if mac_ver:
+            try:
+                major = int(mac_ver.split(".", maxsplit=1)[0])
+            except Exception:
+                major = 0
+        if major >= 26 and not APPLE_STT_FORCE_HELPER:
+            print("⚠️  Apple STT helper is unstable on this macOS release due TCC policy. Set JARVIS_FORCE_APPLE_HELPER=1 to override.")
+            return False
+
         binary = self._ensure_apple_stt_binary()
         if not binary:
             return False
@@ -391,9 +410,8 @@ class SmartMic:
         if self._apple_daemon_proc and self._apple_daemon_proc.poll() is None:
             print("🧠 STT backend: apple_native (on-device, daemon)")
             return True
-        print("⚠️  Apple STT daemon unavailable. Falling back to Google STT.")
+        print("⚠️  Apple STT daemon unavailable.")
         self._apple_native_enabled = False
-        self._stt_mode = "google"
         return False
 
     def _start_apple_stt_daemon(self):
@@ -479,9 +497,8 @@ class SmartMic:
         if requested in {"apple_native", "apple", "native"}:
             if self._init_apple_native_backend():
                 return
-            print("⚠️  Falling back to Google STT.")
-            self._stt_mode = "google"
-            print("🧠 STT backend: google")
+            print("⚠️  Falling back to local/google STT.")
+            self._fallback_to_best_nonapple_backend()
             return
 
         if requested in {"auto"}:
