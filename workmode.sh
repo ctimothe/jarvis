@@ -32,22 +32,27 @@ echo "📦 Installing Python dependencies..."
 "$PYTHON" -m pip install --quiet --upgrade pip
 "$PYTHON" -m pip install --quiet speechrecognition pyaudio pynput requests webrtcvad setuptools
 
-echo "📦 Checking optional local STT dependencies..."
-if ! "$PYTHON" - <<'PY'
+INSTALL_LOCAL_STT="${JARVIS_INSTALL_LOCAL_STT:-0}"
+if [[ "$INSTALL_LOCAL_STT" == "1" ]]; then
+  echo "📦 Checking optional local STT dependencies..."
+  if ! "$PYTHON" - <<'PY'
 import importlib.util
 mods = ("numpy", "faster_whisper")
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 raise SystemExit(1 if missing else 0)
 PY
-then
-  echo "📦 Installing optional local STT packages (numpy, faster-whisper)..."
-  if "$PYTHON" -m pip install --quiet numpy faster-whisper; then
-    echo "✅ Local STT packages installed."
+  then
+    echo "📦 Installing optional local STT packages (numpy, faster-whisper)..."
+    if "$PYTHON" -m pip install --quiet numpy faster-whisper; then
+      echo "✅ Local STT packages installed."
+    else
+      echo "⚠️  Optional local STT install failed. Jarvis will use Google STT fallback."
+    fi
   else
-    echo "⚠️  Optional local STT install failed. Jarvis will use Google STT fallback."
+    echo "✅ Optional local STT packages already available."
   fi
 else
-  echo "✅ Optional local STT packages already available."
+  echo "ℹ️ Optional local STT install skipped (set JARVIS_INSTALL_LOCAL_STT=1 to enable)."
 fi
 
 # Patch webrtcvad wrapper for Python 3.14+ where pkg_resources can be unavailable.
