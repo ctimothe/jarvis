@@ -72,6 +72,9 @@ APPLE_STT_ENERGY_FLOOR = float(os.getenv("JARVIS_APPLE_STT_ENERGY_FLOOR", "0.010
 APPLE_STT_ENERGY_MULTIPLIER = float(os.getenv("JARVIS_APPLE_STT_ENERGY_MULTIPLIER", "2.0"))
 APPLE_STT_BUNDLE_ID = os.getenv("JARVIS_APPLE_STT_BUNDLE_ID", "com.jarvis.speechhelper").strip()
 APPLE_STT_FORCE_HELPER = os.getenv("JARVIS_FORCE_APPLE_HELPER", "0").strip() == "1"
+SHOW_TURN_TIMERS = os.getenv("JARVIS_SHOW_TURN_TIMERS", "1").strip() == "1"
+SHOW_PARTIALS = os.getenv("JARVIS_SHOW_PARTIALS", "1").strip() == "1"
+LOCAL_STT_PARTIAL_MAX_UPDATES = int(os.getenv("JARVIS_LOCAL_PARTIAL_MAX_UPDATES", "10"))
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -714,6 +717,7 @@ class SmartMic:
     ) -> str:
         requested_max = max_record_seconds or MAX_RECORD_SECONDS
         requested_startup = startup_timeout_s or STARTUP_TIMEOUT_S
+        show_partials = show_partials and SHOW_PARTIALS
         if self._apple_native_enabled:
             if announce:
                 print("👂 Listening (Apple Speech)…")
@@ -745,6 +749,8 @@ class SmartMic:
         total        = 0
         speech_frames = 0
         last_partial_text = ""
+        partial_updates = 0
+        partial_suppressed_notice = False
         max_frames   = int(requested_max * 1000 / VAD_FRAME_MS)
         wait_frames  = int(requested_startup * 1000 / VAD_FRAME_MS)
         speech_started_at: float | None = None
@@ -793,8 +799,12 @@ class SmartMic:
                         partial = self._decode_local(b"".join(speech_buf), partial=True)
                         if partial and partial != last_partial_text:
                             last_partial_text = partial
-                            if show_partials:
+                            if show_partials and partial_updates < LOCAL_STT_PARTIAL_MAX_UPDATES:
                                 print(f'📝 Partial: "{partial}"')
+                                partial_updates += 1
+                            elif show_partials and not partial_suppressed_notice:
+                                print("📝 Partial: … (suppressed)")
+                                partial_suppressed_notice = True
         finally:
             stream.stop_stream()
             stream.close()
@@ -1337,6 +1347,34 @@ def _latency_metric(stage: str, value_ms: int):
         print(f"⚠️  Latency warning: {stage}={value_ms}ms (budget {budget}ms)")
 
 
+def _print_turn_timers(
+    capture: dict[str, int],
+    *,
+    transcript_to_response_ms: int | None,
+    total_ms: int,
+    had_text: bool,
+):
+    if not SHOW_TURN_TIMERS:
+        return
+    cue_ms = int(capture.get("cue_to_speech_start_ms", 0))
+    speech_ms = int(capture.get("speech_duration_ms", 0))
+    stt_ms = int(capture.get("speech_end_to_transcript_ms", 0))
+    post_speech_ms = (stt_ms + transcript_to_response_ms) if transcript_to_response_ms is not None else None
+    parts = [
+        f"start={cue_ms}ms",
+        f"speech={speech_ms}ms",
+        f"stt={stt_ms}ms",
+    ]
+    if transcript_to_response_ms is not None:
+        parts.append(f"route={transcript_to_response_ms}ms")
+    if post_speech_ms is not None:
+        parts.append(f"post_speech={post_speech_ms}ms")
+    parts.append(f"total={int(total_ms)}ms")
+    if not had_text:
+        parts.append("transcript=empty")
+    print("⏱  Turn: " + " | ".join(parts))
+
+
 def _get_translator_backend() -> TranslatorBackend:
     global _translator_backend
     with _translator_lock:
@@ -1426,7 +1464,7 @@ def _build_action_request(query: str) -> ActionRequest | None:
     if re.search(r'\b(volume level|what.*volume|volume status|current volume|sound level)\b', lower):
         return ActionRequest(action=ACTION_VOLUME_STATUS, args={}, principal=principal, reason=text)
 
-    if re.search(r'\b(what song|song.*playing|now playing|currently playing|track playing|current song)\b', lower):
+    if re.search(r'\b(what song|what.?s.*playing|song.*playing|now playing|currently(?:\s+being)?\s+played|currently.*playing|track playing|current song|being played)\b', lower):
         return ActionRequest(action=ACTION_NOW_PLAYING, args={}, principal=principal, reason=text)
 
     if re.search(r'\b(wi[- ]?fi|wireless network|network name|network am i on|what network|ssid)\b', lower):
@@ -2169,7 +2207,7 @@ def _classify_by_rules(text: str) -> str | None:
         r'\bgit\s+status\b',
         r'\b(battery|battery\s+health|maximum\s+capacity|cycle\s+count|charging|power adapter)\b',
         r'\b(volume level|current volume|sound level|mute status)\b',
-        r'\b(now playing|what song|song.*playing|currently playing|current song)\b',
+        r'\b(now playing|what song|what.?s.*playing|song.*playing|currently(?:\s+being)?\s+played|currently.*playing|current song|being played)\b',
         r'\b(wi[- ]?fi|ssid|network name|network am i on|what network)\b',
         r'\b(what time|date today|active app|frontmost app|what app is active|which app is running|currently running app)\b',
         r'^\s*translate\b',
@@ -2277,6 +2315,8 @@ def route(text: str) -> str:
     guarded = _truth_policy_guard(text)
     if guarded is not None:
         return guarded
+    if intent == "QUESTION" and CLASSIFIER_MODE != "llm" and RESPONSE_STYLE == "truth_concise":
+        return "Ask a direct command and I will run it fast: battery, volume, now playing, wifi, time, active app, translate, open app, or music controls."
     return ask_ai(text)
 
 
@@ -2373,6 +2413,9 @@ class Jarvis:
         def _run():
             try:
                 t0 = time.perf_counter()
+                capture: dict[str, int] = {}
+                transcript_to_response_ms: int | None = None
+                had_text = False
                 stop_speaking()
                 _play_listen_cue()
                 time.sleep(0.05)
@@ -2387,6 +2430,7 @@ class Jarvis:
                     if "speech_duration_ms" in capture:
                         _latency_metric("speech_duration", int(capture.get("speech_duration_ms", 0)))
                 if text:
+                    had_text = True
                     t_transcript = time.perf_counter()
                     response = route(text)
                     transcript_to_response_ms = int((time.perf_counter() - t_transcript) * 1000)
@@ -2396,7 +2440,14 @@ class Jarvis:
                         _latency_metric("post_speech_to_response", post_speech_ms)
                     if response:
                         speak(response)
-                _latency_metric("roundtrip_total", int((time.perf_counter() - t0) * 1000))
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                _latency_metric("roundtrip_total", total_ms)
+                _print_turn_timers(
+                    capture,
+                    transcript_to_response_ms=transcript_to_response_ms,
+                    total_ms=total_ms,
+                    had_text=had_text,
+                )
             finally:
                 self._busy.release()
                 print("🔇 Ready.\n")
