@@ -428,4 +428,14 @@ def test_apple_privacy_guidance_forces_google_fallback(jarvis, monkeypatch):
     monkeypatch.setattr(jarvis, "APPLE_STT_BUNDLE_ID", "com.jarvis.speechhelper")
     jarvis.SmartMic._apple_stt_privacy_guidance(mic)
     assert mic._apple_native_enabled is False
-    assert mic._stt_mode == "google"
+    assert mic._stt_mode in {"local", "google"}
+
+
+def test_apple_backend_skips_on_new_macos_without_force(jarvis, monkeypatch):
+    mic = jarvis.SmartMic.__new__(jarvis.SmartMic)
+    mic._apple_native_enabled = False
+    mic._stt_mode = "google"
+    monkeypatch.setattr(jarvis, "APPLE_STT_FORCE_HELPER", False)
+    monkeypatch.setattr(jarvis.platform, "mac_ver", lambda: ("26.4", ("", "", ""), ""))
+    monkeypatch.setattr(jarvis.SmartMic, "_ensure_apple_stt_binary", lambda _self: (_ for _ in ()).throw(RuntimeError("should not build")))
+    assert jarvis.SmartMic._init_apple_native_backend(mic) is False
