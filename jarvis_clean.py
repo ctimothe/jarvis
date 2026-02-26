@@ -2442,6 +2442,10 @@ class Jarvis:
             if now - self._last_interrupt_notice > 1.0:
                 stop_speaking()
                 print("⏳ Interrupted — press again to speak.")
+                try:
+                    speak("Interrupted. Press again to speak.")
+                except Exception as exc:
+                    print(f"⚠️  TTS error during interrupt notice: {exc}")
                 self._last_interrupt_notice = now
             return
 
@@ -2451,30 +2455,42 @@ class Jarvis:
                 capture: dict[str, int] = {}
                 transcript_to_response_ms: int | None = None
                 had_text = False
-                stop_speaking()
-                _play_listen_cue()
-                time.sleep(0.05)
-                if not self._smart_mic:
-                    speak("Microphone unavailable.")
-                    return
-                text = self._smart_mic.listen()
-                capture = getattr(self._smart_mic, "last_capture_info", {})
-                if capture:
-                    _latency_metric("cue_to_speech_start", int(capture.get("cue_to_speech_start_ms", 0)))
-                    _latency_metric("speech_end_to_transcript", int(capture.get("speech_end_to_transcript_ms", 0)))
-                    if "speech_duration_ms" in capture:
-                        _latency_metric("speech_duration", int(capture.get("speech_duration_ms", 0)))
-                if text:
-                    had_text = True
-                    t_transcript = time.perf_counter()
-                    response = route(text)
-                    transcript_to_response_ms = int((time.perf_counter() - t_transcript) * 1000)
-                    _latency_metric("transcript_to_response", transcript_to_response_ms)
-                    if capture:
-                        post_speech_ms = int(capture.get("speech_end_to_transcript_ms", 0)) + transcript_to_response_ms
-                        _latency_metric("post_speech_to_response", post_speech_ms)
-                    if response:
+                response: str | None = None
+                try:
+                    stop_speaking()
+                    _play_listen_cue()
+                    time.sleep(0.05)
+                    if not self._smart_mic:
+                        response = "Microphone unavailable."
+                    else:
+                        text = self._smart_mic.listen()
+                        capture = getattr(self._smart_mic, "last_capture_info", {})
+                        if capture:
+                            _latency_metric("cue_to_speech_start", int(capture.get("cue_to_speech_start_ms", 0)))
+                            _latency_metric("speech_end_to_transcript", int(capture.get("speech_end_to_transcript_ms", 0)))
+                            if "speech_duration_ms" in capture:
+                                _latency_metric("speech_duration", int(capture.get("speech_duration_ms", 0)))
+                        if text:
+                            had_text = True
+                            t_transcript = time.perf_counter()
+                            routed = route(text)
+                            transcript_to_response_ms = int((time.perf_counter() - t_transcript) * 1000)
+                            _latency_metric("transcript_to_response", transcript_to_response_ms)
+                            if capture:
+                                post_speech_ms = int(capture.get("speech_end_to_transcript_ms", 0)) + transcript_to_response_ms
+                                _latency_metric("post_speech_to_response", post_speech_ms)
+                            response = routed
+                        else:
+                            _metric("turn.transcript_empty", 1, {})
+                            response = "I didn't catch that."
+                except Exception as exc:
+                    print(f"⚠️  Unexpected error during turn: {exc}")
+                    response = "Something went wrong with that request."
+                if response:
+                    try:
                         speak(response)
+                    except Exception as exc:
+                        print(f"⚠️  TTS error when speaking response: {exc}")
                 total_ms = int((time.perf_counter() - t0) * 1000)
                 _latency_metric("roundtrip_total", total_ms)
                 _print_turn_timers(
