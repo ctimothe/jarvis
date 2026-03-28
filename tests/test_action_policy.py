@@ -202,6 +202,11 @@ def test_policy_requires_approval_for_delete(jarvis):
     assert decision.requires_approval is True
 
 
+def test_action_categories_cover_supported(jarvis):
+    all_cats = set().union(*jarvis.ACTION_CATEGORIES.values())
+    assert jarvis.SUPPORTED_ACTIONS.issubset(all_cats)
+
+
 def test_git_actions_enforce_home_policy(jarvis):
     outside = "/tmp/repo"
     inside = "/Users/tester/code"

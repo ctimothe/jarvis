@@ -77,6 +77,8 @@ APPLE_STT_FORCE_HELPER = os.getenv("JARVIS_FORCE_APPLE_HELPER", "0").strip() == 
 SHOW_TURN_TIMERS = os.getenv("JARVIS_SHOW_TURN_TIMERS", "1").strip() == "1"
 SHOW_PARTIALS = os.getenv("JARVIS_SHOW_PARTIALS", "1").strip() == "1"
 LOCAL_STT_PARTIAL_MAX_UPDATES = int(os.getenv("JARVIS_LOCAL_PARTIAL_MAX_UPDATES", "10"))
+DEBUG_AUDIO_ENABLED = os.getenv("JARVIS_DEBUG_AUDIO", "0").strip() == "1"
+DEBUG_AUDIO_DIR = Path(os.getenv("JARVIS_DEBUG_AUDIO_DIR", str(Path(HOME) / ".jarvis_debug" / "audio"))).expanduser()
 
 # ── SmartMic constants ────────────────────────────────────────────────────────
 VAD_SAMPLE_RATE      = 16000   # Hz  — required by webrtcvad
@@ -192,6 +194,32 @@ def _chat(system: str, user: str, temperature: float = 0.3,
         return f"AI error: {e}"
 
 
+TRUTH_CONCISE_SYSTEM_PROMPT = (
+    "You are J.A.R.V.I.S., a voice assistant. "
+    "Answer in plain spoken English, maximum 1 sentence, no markdown. "
+    "Be factual and concise. "
+    "If unsure, say you cannot verify it. "
+    "CRITICAL: You cannot perform actions on the computer yourself. "
+    "NEVER claim you created, opened, deleted, monitored, or performed actions. "
+    "NEVER invent live system state."
+)
+
+BALANCED_SYSTEM_PROMPT = (
+    "You are J.A.R.V.I.S., a voice assistant. "
+    "Answer in plain spoken English, maximum 3 sentences, no markdown. "
+    "CRITICAL: You cannot perform actions on the computer yourself. "
+    "Only the Python code beneath you can open apps, create files, run commands, etc. "
+    "If asked to do something on the computer, say you will pass it to the system. "
+    "NEVER claim you created, opened, deleted, or performed any action. "
+    "NEVER claim you are monitoring systems, watching services, or running in the background. "
+    "NEVER write 'User:', 'Human:', or simulate a dialogue."
+)
+
+SUMMARY_SYSTEM_PROMPT = (
+    "Summarize this command output in 1-2 plain spoken sentences. No markdown."
+)
+
+
 def ask_ai(prompt: str) -> str:
     """General Q&A. Strictly forbidden from pretending to perform computer actions."""
     if not _ollama_alive():
@@ -199,27 +227,10 @@ def ask_ai(prompt: str) -> str:
         if not _ollama_alive():
             return "The AI is offline. Make sure Ollama is running."
     if RESPONSE_STYLE == "truth_concise":
-        system_prompt = (
-            "You are J.A.R.V.I.S., a voice assistant. "
-            "Answer in plain spoken English, maximum 1 sentence, no markdown. "
-            "Be factual and concise. "
-            "If unsure, say you cannot verify it. "
-            "CRITICAL: You cannot perform actions on the computer yourself. "
-            "NEVER claim you created, opened, deleted, monitored, or performed actions. "
-            "NEVER invent live system state."
-        )
+        system_prompt = TRUTH_CONCISE_SYSTEM_PROMPT
         temperature = 0.1
     else:
-        system_prompt = (
-            "You are J.A.R.V.I.S., a voice assistant. "
-            "Answer in plain spoken English, maximum 3 sentences, no markdown. "
-            "CRITICAL: You cannot perform actions on the computer yourself. "
-            "Only the Python code beneath you can open apps, create files, run commands, etc. "
-            "If asked to do something on the computer, say you will pass it to the system. "
-            "NEVER claim you created, opened, deleted, or performed any action. "
-            "NEVER claim you are monitoring systems, watching services, or running in the background. "
-            "NEVER write 'User:', 'Human:', or simulate a dialogue."
-        )
+        system_prompt = BALANCED_SYSTEM_PROMPT
         temperature = 0.3
 
     return _chat(system=system_prompt, user=prompt, temperature=temperature)
@@ -263,6 +274,24 @@ class SmartMic:
         self._partial_interval_frames = max(6, int(LOCAL_STT_PARTIAL_INTERVAL_MS / VAD_FRAME_MS))
         self.last_capture_info: dict[str, int] = {}
         self._init_stt_backend()
+
+    def _debug_dump_audio(self, raw: bytes, sample_rate: int) -> None:
+        if not DEBUG_AUDIO_ENABLED or not raw:
+            return
+        try:
+            DEBUG_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            path = DEBUG_AUDIO_DIR / f"turn-{ts}.wav"
+            import wave
+
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(raw)
+            print(f"📁 Saved debug audio to {path}")
+        except Exception as exc:
+            print(f"⚠️  Failed to write debug audio: {exc}")
 
     def _ensure_apple_stt_binary(self) -> str | None:
         if platform.system() != "Darwin":
@@ -829,6 +858,7 @@ class SmartMic:
 
         speech_ended_at = time.time()
         raw = b"".join(speech_buf)
+        self._debug_dump_audio(raw, VAD_SAMPLE_RATE)
         if announce:
             print("🔄 Recognising…")
 
@@ -1045,6 +1075,46 @@ SUPPORTED_ACTIONS = {
     ACTION_QUIT_APP,
     ACTION_FOCUS_APP,
     ACTION_OPEN_URL,
+}
+
+ACTION_CATEGORIES: dict[str, set[str]] = {
+    "fs": {
+        ACTION_CREATE_FOLDER,
+        ACTION_CREATE_FILE,
+        ACTION_LIST_PATH,
+        ACTION_FIND_NAME,
+        ACTION_MOVE_PATH,
+        ACTION_COPY_PATH,
+        ACTION_RENAME_PATH,
+        ACTION_DELETE_PATH,
+    },
+    "status": {
+        ACTION_DISK_USAGE,
+        ACTION_BATTERY_STATUS,
+        ACTION_VOLUME_STATUS,
+        ACTION_NOW_PLAYING,
+        ACTION_WIFI_STATUS,
+        ACTION_TIME_STATUS,
+        ACTION_ACTIVE_APP,
+    },
+    "dev": {
+        ACTION_GIT_STATUS,
+        ACTION_GIT_DIFF_STAT,
+        ACTION_GIT_LOG_RECENT,
+        ACTION_GIT_BRANCHES,
+        ACTION_GIT_RECENT_CHANGES,
+        ACTION_PROJECT_SEARCH,
+    },
+    "language": {
+        ACTION_TRANSLATE_TEXT,
+    },
+    "macos": {
+        ACTION_SET_VOLUME_LEVEL,
+        ACTION_TOGGLE_MUTE,
+        ACTION_QUIT_APP,
+        ACTION_FOCUS_APP,
+        ACTION_OPEN_URL,
+    },
 }
 
 WRITE_ACTIONS = {
@@ -2199,7 +2269,7 @@ def _format_action_result(result: ActionResult) -> str:
         return result.stdout
     snippet = result.stdout[:600]
     summary = _chat(
-        system="Summarize this command output in 1-2 plain spoken sentences. No markdown.",
+        system=SUMMARY_SYSTEM_PROMPT,
         user=f"Command: {result.command_repr}\nOutput:\n{snippet}",
         temperature=0.2,
     )
