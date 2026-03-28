@@ -23,7 +23,7 @@ jobs:
           python -m pip install pytest
 
       - name: Run unit tests
-        run: pytest -q
+        run: PYTHONPATH=$(pwd) pytest -q
 
       - name: Run latency benchmark
         run: python scripts/benchmark_latency.py
