@@ -6,7 +6,6 @@ Jarvis - bounded autonomous task runner
 - Deterministic local Siri-style status commands (battery, volume, song, wifi, date/time, active app)
 
 ## Daily-driver voice commands
-
 - STATUS:
   - `is my laptop charging`
   - `what is my volume level`
@@ -26,22 +25,18 @@ Jarvis - bounded autonomous task runner
   - `git branches in ~/code`
   - `what changed since last commit in ~/code`
   - `search for hello in ~/code`
-
 Quick commands:
 - Start voice assistant: `bash workmode.sh`
 - Check health: `bash status.sh`
 - Stop assistant: `bash stopwork.sh`
 - Reset local runner state/logs: `bash scripts/reset_state.sh`
 - Run tests: `.venv/bin/python3 -m pytest -q`
-
 Mission mode example:
 - Say: `create folder called wow then create file called wow/notes.txt then list wow`
 - Jarvis previews the plan, then waits for: `execute mission` or `cancel mission`
-
 Battery example:
 - Say: `what is the percentage of my battery health`
 - Jarvis routes to shell status and speaks charge + health summary.
-
 Local status examples:
 - `what is my volume level`
 - `what song is playing`
