@@ -7,7 +7,7 @@ Jarvis - bounded autonomous task runner
 
 ## Daily-driver voice commands
 
-- Status:
+- STATUS:
   - `is my laptop charging`
   - `what is my volume level`
   - `what song is playing`
