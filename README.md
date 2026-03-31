@@ -4,7 +4,6 @@ Jarvis - bounded autonomous task runner
 - Interrupt with Ctrl-C to gracefully stop; you can resume later
 - Mission mode for multi-step shell actions with preview + explicit execute/cancel
 - Deterministic local Siri-style status commands (battery, volume, song, wifi, date/time, active app)
-
 ## Daily-driver voice commands
 - STATUS:
   - `is my laptop charging`
