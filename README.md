@@ -42,11 +42,9 @@ Local status examples:
 - `am i on wifi`
 - `what time is it`
 - `what app is active`
-
 Translation examples:
 - `translate "hello" to spanish`
 - `say this in french: good morning`
-
 Latency tuning:
 - Default listen cue is a short beep (faster than spoken "Listening").
 - Optional: `export JARVIS_LISTEN_CUE=speech` (old behavior) or `export JARVIS_LISTEN_CUE=none`.
