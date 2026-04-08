@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS Interface</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Share+Tech+Mono&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --primary: #00d4ff;
+            --primary-dim: #007a99;
+            --accent: #7b2ff7;
+            --bg-dark: #0a0e14;
+            --bg-panel: rgba(10, 20, 35, 0.85);
+            --border: rgba(0, 212, 255, 0.2);
+            --text-main: #e8f4f8;
+            --text-dim: #6a8a9a;
+            --success: #00ff88;
+            --warning: #ffaa00;
+            --danger: #ff3366;
+        }
+        
+        body {
+            font-family: 'Share Tech Mono', monospace;
+            background: var(--bg-dark);
+            color: var(--text-main);
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(ellipse at 50% 0%, rgba(0, 212, 255, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(123, 47, 247, 0.05) 0%, transparent 40%);
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0, 212, 255, 0.015) 2px,
+                rgba(0, 212, 255, 0.015) 4px
+            );
+            pointer-events: none;
+            z-index: 1000;
+        }
+        
+        .scanline {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--primary), transparent);
+            opacity: 0.3;
+            animation: scanline 8s linear infinite;
+            pointer-events: none;
+            z-index: 999;
+        }
+        
+        @keyframes scanline {
+            0% { top: -2px; }
+            100% { top: 100%; }
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            position: relative;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+            position: relative;
+        }
+        
+        header::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--primary), transparent);
+            opacity: 0.5;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .arc-reactor {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: conic-gradient(from 0deg, var(--primary), var(--primary-dim), var(--primary));
+            position: relative;
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+        
+        .arc-reactor::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 35px;
+            height: 35px;
+            background: var(--bg-dark);
+            border-radius: 50%;
+            border: 2px solid var(--primary);
+        }
+        
+        .arc-reactor::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 15px;
+            height: 15px;
+            background: var(--primary);
+            border-radius: 50%;
+            box-shadow: 0 0 20px var(--primary), 0 0 40px var(--primary);
+            animation: core-pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-glow {
+            0%, 100% { filter: drop-shadow(0 0 5px var(--primary)); }
+            50% { filter: drop-shadow(0 0 15px var(--primary)); }
+        }
+        
+        @keyframes core-pulse {
+            0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+            50% { opacity: 0.8; transform: translate(-50%, -50%) scale(0.9); }
+        }
+        
+        h1 {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 700;
+            letter-spacing: 4px;
+            color: var(--text-main);
+            text-transform: uppercase;
+        }
+        
+        h1 span {
+            color: var(--primary);
+        }
+        
+        .header-status {
+            display: flex;
+            gap: 20px;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+            animation: blink 2s ease-in-out infinite;
+        }
+        
+        .status-dot.offline {
+            background: var(--danger);
+            box-shadow: 0 0 8px var(--danger);
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+        
+        @media (max-width: 1024px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+        
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .panel::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--primary), transparent);
+        }
+        
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .panel-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.85rem;
+            color: var(--primary);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .panel-title::before {
+            content: '◆';
+            font-size: 0.6rem;
+        }
+        
+        .panel-meta {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+        }
+        
+        .input-wrapper {
+            position: relative;
+        }
+        
+        .input-wrapper::before {
+            content: '>';
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--primary);
+            font-family: 'Share Tech Mono', monospace;
+            z-index: 1;
+        }
+        
+        #commandInput {
+            width: 100%;
+            padding: 16px 16px 16px 40px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-main);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+        
+        #commandInput:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 15px rgba(0, 212, 255, 0.2);
+        }
+        
+        #commandInput::placeholder {
+            color: var(--text-dim);
+        }
+        
+        #executeBtn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            padding: 10px 20px;
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.75rem;
+            letter-spacing: 2px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+        }
+        
+        #executeBtn:hover {
+            background: var(--primary);
+            color: var(--bg-dark);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .commands-list {
+            max-height: 350px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--primary-dim) var(--bg-dark);
+        }
+        
+        .commands-list::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .commands-list::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+        }
+        
+        .commands-list::-webkit-scrollbar-thumb {
+            background: var(--primary-dim);
+            border-radius: 2px;
+        }
+        
+        .command-item {
+            padding: 12px 15px;
+            margin-bottom: 8px;
+            background: rgba(0, 212, 255, 0.03);
+            border-left: 2px solid var(--border);
+            border-radius: 0 4px 4px 0;
+            transition: all 0.3s ease;
+        }
+        
+        .command-item:hover {
+            background: rgba(0, 212, 255, 0.08);
+            border-left-color: var(--primary);
+        }
+        
+        .command-item .cmd {
+            color: var(--primary);
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        
+        .command-item .response {
+            margin-top: 8px;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            line-height: 1.4;
+        }
+        
+        .command-item .timestamp {
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            opacity: 0.6;
+            margin-top: 8px;
+            font-family: 'Share Tech Mono', monospace;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        
+        .metric-card {
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .metric-card .label {
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        
+        .metric-card .value {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        
+        .metric-card .value.success { color: var(--success); }
+        .metric-card .value.warning { color: var(--warning); }
+        .metric-card .value.error { color: var(--danger); }
+        
+        .config-form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .config-group label {
+            display: block;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        
+        .config-group select {
+            width: 100%;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-main);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .config-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+        
+        .config-group select option {
+            background: var(--bg-dark);
+            color: var(--text-main);
+        }
+        
+        #saveConfig {
+            margin-top: 10px;
+            padding: 12px 24px;
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.75rem;
+            letter-spacing: 2px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+        }
+        
+        #saveConfig:hover {
+            background: var(--primary);
+            color: var(--bg-dark);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .system-log {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        
+        .log-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .log-entry::before {
+            content: '●';
+            color: var(--primary-dim);
+            margin-right: 8px;
+        }
+        
+        .log-entry.error::before { color: var(--danger); }
+        .log-entry.success::before { color: var(--success); }
+        
+        .system-log .timestamp {
+            color: var(--primary-dim);
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="scanline"></div>
+    
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="arc-reactor"></div>
+                <h1>JARVIS <span>Interface</span></h1>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator">
+                    <div class="status-dot" id="llmStatus"></div>
+                    <span>AI CORE</span>
+                </div>
+                <div class="status-indicator">
+                    <span id="platformDisplay">—</span>
+                </div>
+                <div class="status-indicator">
+                    <span id="timeDisplay">—</span>
+                </div>
+            </div>
+        </header>
+        
+        <div class="grid">
+            <div class="main-column">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Command Input</div>
+                        <div class="panel-meta">AWAITING INPUT</div>
+                    </div>
+                    <div class="input-wrapper">
+                        <input type="text" id="commandInput" placeholder="Enter command sequence..." onkeypress="handleKeyPress(event)">
+                        <button id="executeBtn" onclick="executeCommand()">Execute</button>
+                    </div>
+                </div>
+                
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-header">
+                        <div class="panel-title">Command Log</div>
+                        <div class="panel-meta" id="commandCount">0 ENTRIES</div>
+                    </div>
+                    <div class="commands-list" id="commandsList">
+                        <div class="command-item">
+                            <div class="cmd">System initialized...</div>
+                            <div class="response">All systems operational. Awaiting input.</div>
+                            <div class="timestamp">—</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-header">
+                        <div class="panel-title">System Log</div>
+                    </div>
+                    <div class="system-log" id="systemLog"></div>
+                </div>
+            </div>
+            
+            <div class="side-column">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Status</div>
+                    </div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="label">LLM</div>
+                            <div class="value" id="llmMetric">—</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="label">STT</div>
+                            <div class="value" id="sttMetric">—</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="label">TTS</div>
+                            <div class="value" id="ttsMetric">—</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="label">Trigger</div>
+                            <div class="value" id="triggerMetric">—</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-header">
+                        <div class="panel-title">Configuration</div>
+                    </div>
+                    <div class="config-form">
+                        <div class="config-group">
+                            <label>AI Backend</label>
+                            <select id="configLLM">
+                                <option value="ollama">Ollama (Local)</option>
+                                <option value="none">None (Commands only)</option>
+                            </select>
+                        </div>
+                        <div class="config-group">
+                            <label>Speech Recognition</label>
+                            <select id="configSTT">
+                                <option value="auto">Auto Detect</option>
+                                <option value="apple">Apple Speech</option>
+                                <option value="whisper">Whisper</option>
+                                <option value="google">Google Cloud</option>
+                            </select>
+                        </div>
+                        <div class="config-group">
+                            <label>Trigger Mode</label>
+                            <select id="configTrigger">
+                                <option value="hotkey">Hotkey (Cmd+Shift+J)</option>
+                                <option value="wake">Wake Word</option>
+                                <option value="hybrid">Hybrid</option>
+                            </select>
+                        </div>
+                        <button id="saveConfig" onclick="saveConfig()">Save Configuration</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let commandCount = 0;
+        
+        function log(msg, type = 'info') {
+            const logEl = document.getElementById('systemLog');
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.innerHTML = `<span class="timestamp">[${time}]</span> ${msg}`;
+            logEl.insertBefore(entry, logEl.firstChild);
+            if (logEl.children.length > 20) logEl.lastChild.remove();
+        }
+        
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') executeCommand();
+        }
+        
+        async function executeCommand() {
+            const input = document.getElementById('commandInput');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            log(`Executing: ${text}`);
+            input.value = '';
+            
+            try {
+                const res = await fetch('/api/execute', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text})
+                });
+                const data = await res.json();
+                
+                if (data.ok) {
+                    log('Command executed successfully', 'success');
+                    addCommand(text, data.response);
+                } else {
+                    log(`Error: ${data.error}`, 'error');
+                }
+            } catch (err) {
+                log(`Connection error: ${err}`, 'error');
+            }
+        }
+        
+        function addCommand(cmd, response) {
+            commandCount++;
+            document.getElementById('commandCount').textContent = `${commandCount} ENTRIES`;
+            
+            const list = document.getElementById('commandsList');
+            const item = document.createElement('div');
+            item.className = 'command-item';
+            item.innerHTML = `
+                <div class="cmd">${cmd}</div>
+                <div class="response">${response || 'No response'}</div>
+                <div class="timestamp">${new Date().toLocaleTimeString('en-US', { hour12: false })}</div>
+            `;
+            list.insertBefore(item, list.children[0]);
+            if (list.children.length > 50) list.lastChild.remove();
+        }
+        
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                
+                const llmDot = document.getElementById('llmStatus');
+                llmDot.className = data.llm_available ? 'status-dot' : 'status-dot offline';
+                
+                document.getElementById('platformDisplay').textContent = data.platform;
+                document.getElementById('timeDisplay').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+                
+                document.getElementById('llmMetric').textContent = data.llm_available ? 'ON' : 'OFF';
+                document.getElementById('llmMetric').className = data.llm_available ? 'value success' : 'value error';
+                
+                document.getElementById('sttMetric').textContent = data.stt_backend.toUpperCase();
+                document.getElementById('ttsMetric').textContent = data.tts_backend.toUpperCase();
+                document.getElementById('triggerMetric').textContent = data.trigger_mode.toUpperCase();
+            } catch (err) {
+                log('Failed to load status', 'error');
+            }
+        }
+        
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                
+                document.getElementById('configLLM').value = data.llm?.backend || 'ollama';
+                document.getElementById('configSTT').value = data.stt?.backend || 'auto';
+                document.getElementById('configTrigger').value = data.trigger?.mode || 'hotkey';
+            } catch (err) {
+                log('Failed to load config', 'error');
+            }
+        }
+        
+        async function saveConfig() {
+            const config = {
+                llm: { backend: document.getElementById('configLLM').value },
+                stt: { backend: document.getElementById('configSTT').value },
+                trigger: { mode: document.getElementById('configTrigger').value }
+            };
+            
+            try {
+                await fetch('/api/config', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                log('Configuration saved', 'success');
+            } catch (err) {
+                log('Failed to save config', 'error');
+            }
+        }
+        
+        socket.on('command_result', (data) => {
+            if (data.text) addCommand(data.text, data.response);
+        });
+        
+        log('Interface initialized');
+        loadStatus();
+        loadConfig();
+        
+        setInterval(() => {
+            loadStatus();
+        }, 3000);
+    </script>
+</body>
+</html>
