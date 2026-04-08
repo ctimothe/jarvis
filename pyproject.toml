@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-open"
+version = "2.0.0"
+description = "Privacy-first, extensible voice assistant with local-first design"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+requires-python = ">=3.10"
+keywords = [
+    "voice-assistant",
+    "speech-recognition",
+    "automation",
+    "macos",
+    "linux",
+    "llm",
+    "ollama",
+    "privacy",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "requests>=2.31.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+audio = [
+    "pyaudio>=0.2.14",
+    "webrtcvad>=2.0.10",
+]
+ml = [
+    "faster-whisper>=0.10.0",
+    "openwakeword>=0.1.0",
+]
+tts = [
+    "pyttsx3>=2.90",
+]
+web = [
+    "flask>=3.0.0",
+    "flask-socketio>=5.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+jarvis = "jarvis.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/yourname/jarvis-open"
+Repository = "https://github.com/yourname/jarvis-open"
+Issues = "https://github.com/yourname/jarvis-open/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jarvis*"]
+exclude = ["tests*", "docs*", "scripts*", "*.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
